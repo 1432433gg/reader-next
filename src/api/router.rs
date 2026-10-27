@@ -1,0 +1,468 @@
+use crate::api::{handlers, AppState};
+use axum::{
+    extract::DefaultBodyLimit,
+    routing::{any, get, post},
+    Router,
+};
+use std::path::PathBuf;
+use tower_http::cors::CorsLayer;
+use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
+use tower_http::services::ServeDir;
+use tower_http::trace::TraceLayer;
+
+const CHAPTER_UPDATE_STATUS_ROUTE: &str = "/reader3/getChapterUpdateStatus";
+const CHAPTER_UPDATE_CHECK_ROUTE: &str = "/reader3/checkChapterUpdates";
+
+pub fn build_router(state: AppState) -> Router {
+    let api = Router::new()
+        .route("/health", get(handlers::health))
+        .route(
+            "/reader3/getBookSource",
+            get(handlers::get_book_source).post(handlers::get_book_source),
+        )
+        .route(
+            "/reader3/getBookSources",
+            get(handlers::get_book_sources).post(handlers::get_book_sources),
+        )
+        .route(
+            "/reader3/getDefaultBookSourceOwner",
+            get(handlers::get_default_book_source_owner),
+        )
+        .route(
+            "/reader3/loginBookSource",
+            post(handlers::login_book_source),
+        )
+        .route(
+            "/reader3/getExploreKinds",
+            post(handlers::get_explore_kinds),
+        )
+        .route(
+            "/reader3/testBookSources",
+            post(handlers::test_book_sources),
+        )
+        .route(
+            "/reader3/deleteInvalidBookSources",
+            post(handlers::delete_invalid_book_sources),
+        )
+        .route("/reader3/bookSourceProxy", any(handlers::book_source_proxy))
+        .route(
+            "/reader3/bookSourceClientLog",
+            any(handlers::book_source_client_log),
+        )
+        .route("/reader3/saveBookSource", post(handlers::save_book_source))
+        .route(
+            "/reader3/saveBookSources",
+            post(handlers::save_book_sources),
+        )
+        .route(
+            "/reader3/deleteBookSource",
+            post(handlers::delete_book_source),
+        )
+        .route(
+            "/reader3/deleteBookSources",
+            post(handlers::delete_book_sources),
+        )
+        .route(
+            "/reader3/deleteAllBookSources",
+            post(handlers::delete_all_book_sources),
+        )
+        .route(
+            "/reader3/setAsDefaultBookSources",
+            post(handlers::set_as_default_book_sources),
+        )
+        .route(
+            "/reader3/readRemoteSourceFile",
+            post(handlers::read_remote_source_file),
+        )
+        .route("/reader3/readSourceFile", post(handlers::read_source_file))
+        .route(
+            "/reader3/searchBook",
+            get(handlers::search_book).post(handlers::search_book),
+        )
+        .route(
+            "/reader3/exploreBook",
+            get(handlers::explore_book).post(handlers::explore_book),
+        )
+        .route(
+            "/reader3/exploreBookGlobal",
+            post(handlers::explore_book_global),
+        )
+        .route(
+            "/reader3/searchBookMulti",
+            get(handlers::search_book_multi).post(handlers::search_book_multi),
+        )
+        .route("/reader3/getBookshelf", get(handlers::get_bookshelf))
+        .route(
+            "/reader3/getShelfBook",
+            get(handlers::get_shelf_book).post(handlers::get_shelf_book),
+        )
+        .route(
+            "/reader3/getShelfBookWithCacheInfo",
+            get(handlers::get_shelf_book_with_cache_info),
+        )
+        .route(
+            "/reader3/getBookGroups",
+            get(handlers::get_book_groups).post(handlers::get_book_groups),
+        )
+        .route("/reader3/saveBookGroup", post(handlers::save_book_group))
+        .route(
+            "/reader3/saveBookGroupOrder",
+            post(handlers::save_book_group_order),
+        )
+        .route(
+            "/reader3/deleteBookGroup",
+            post(handlers::delete_book_group),
+        )
+        .route(
+            "/reader3/saveBookGroupId",
+            post(handlers::save_book_group_id),
+        )
+        .route(
+            "/reader3/addBookGroupMulti",
+            post(handlers::add_book_group_multi),
+        )
+        .route(
+            "/reader3/removeBookGroupMulti",
+            post(handlers::remove_book_group_multi),
+        )
+        .route("/reader3/uploadTxtBook", post(handlers::upload_txt_book))
+        .route("/reader3/uploadEpubBook", post(handlers::upload_epub_book))
+        .route("/reader3/uploadMobiBook", post(handlers::upload_mobi_book))
+        .route("/reader3/uploadPdfBook", post(handlers::upload_pdf_book))
+        .route("/reader3/saveBook", post(handlers::save_book))
+        .route("/reader3/saveBooks", post(handlers::save_books))
+        .route("/reader3/setBookSource", post(handlers::set_book_source))
+        .route("/reader3/deleteBook", post(handlers::delete_book))
+        .route("/reader3/deleteBooks", post(handlers::delete_books))
+        .route(
+            "/reader3/saveBookProgress",
+            post(handlers::save_book_progress),
+        )
+        .route(
+            "/reader3/getBookInfo",
+            get(handlers::get_book_info).post(handlers::get_book_info),
+        )
+        .route(
+            "/reader3/getChapterList",
+            get(handlers::get_chapter_list).post(handlers::get_chapter_list),
+        )
+        .route(
+            "/reader3/getBookContent",
+            get(handlers::get_book_content).post(handlers::get_book_content),
+        )
+        .route(
+            "/reader3/deleteBookCache",
+            post(handlers::delete_book_cache),
+        )
+        .route(
+            "/reader3/getInvalidBookSources",
+            post(handlers::get_invalid_book_sources),
+        )
+        .route(
+            "/reader3/cacheBookSSE",
+            get(handlers::cache_book_sse).post(handlers::cache_book_sse),
+        )
+        .route(
+            "/reader3/searchBookMultiSSE",
+            get(handlers::search_book_multi_sse),
+        )
+        .route(
+            "/reader3/searchBookSourceSSE",
+            get(handlers::search_book_source_sse),
+        )
+        .route(
+            "/reader3/getAvailableBookSource",
+            get(handlers::get_available_book_source).post(handlers::get_available_book_source),
+        )
+        .route(
+            "/reader3/getAvailableBookSourceSSE",
+            get(handlers::get_available_book_source_sse),
+        )
+        .route(
+            "/reader3/bookSourceDebugSSE",
+            get(handlers::book_source_debug_sse),
+        )
+        .route("/reader3/cover", get(handlers::get_book_cover))
+        .route("/reader3/getRssSources", get(handlers::get_rss_sources))
+        .route("/reader3/saveRssSource", post(handlers::save_rss_source))
+        .route("/reader3/saveRssSources", post(handlers::save_rss_sources))
+        .route(
+            "/reader3/deleteRssSource",
+            post(handlers::delete_rss_source),
+        )
+        .route(
+            "/reader3/deleteRssSources",
+            post(handlers::delete_rss_sources),
+        )
+        .route(
+            "/reader3/readRemoteRssSourceFile",
+            post(handlers::read_remote_rss_source_file),
+        )
+        .route(
+            "/reader3/readRssSourceFile",
+            post(handlers::read_rss_source_file),
+        )
+        .route(
+            "/reader3/getRssArticles",
+            get(handlers::get_rss_articles).post(handlers::get_rss_articles),
+        )
+        .route(
+            "/reader3/getRssContent",
+            get(handlers::get_rss_content).post(handlers::get_rss_content),
+        )
+        .route("/reader3/getBookmarks", get(handlers::get_bookmarks))
+        .route("/reader3/saveBookmark", post(handlers::save_bookmark))
+        .route("/reader3/saveBookmarks", post(handlers::save_bookmarks))
+        .route("/reader3/deleteBookmark", post(handlers::delete_bookmark))
+        .route("/reader3/deleteBookmarks", post(handlers::delete_bookmarks))
+        .route(
+            CHAPTER_UPDATE_STATUS_ROUTE,
+            get(handlers::get_chapter_update_status),
+        )
+        .route(
+            CHAPTER_UPDATE_CHECK_ROUTE,
+            post(handlers::check_chapter_updates),
+        )
+        .route("/reader3/getReplaceRules", get(handlers::get_replace_rules))
+        .route(
+            "/reader3/saveReplaceRule",
+            post(handlers::save_replace_rule),
+        )
+        .route(
+            "/reader3/saveReplaceRules",
+            post(handlers::save_replace_rules),
+        )
+        .route(
+            "/reader3/deleteReplaceRule",
+            post(handlers::delete_replace_rule),
+        )
+        .route(
+            "/reader3/deleteReplaceRules",
+            post(handlers::delete_replace_rules),
+        )
+        .route(
+            "/reader3/getWebdavFileList",
+            get(handlers::get_webdav_file_list),
+        )
+        .route("/reader3/getWebdavFile", get(handlers::get_webdav_file))
+        .route(
+            "/reader3/uploadFileToWebdav",
+            post(handlers::upload_file_to_webdav),
+        )
+        .route(
+            "/reader3/deleteWebdavFile",
+            post(handlers::delete_webdav_file),
+        )
+        .route(
+            "/reader3/deleteWebdavFileList",
+            post(handlers::delete_webdav_file_list),
+        )
+        .route("/reader3/webdav/*path", any(handlers::webdav_handler))
+        .route("/reader3/login", post(handlers::login))
+        .route("/reader3/logout", post(handlers::logout))
+        .route("/reader3/getUserInfo", get(handlers::get_user_info))
+        .route(
+            "/reader3/getVersionUpdate",
+            get(handlers::get_version_update),
+        )
+        .route(
+            "/reader3/dismissVersionUpdate",
+            post(handlers::dismiss_version_update),
+        )
+        .route("/reader3/saveUserConfig", post(handlers::save_user_config))
+        .route("/reader3/getUserConfig", get(handlers::get_user_config))
+        .route("/reader3/getUserList", get(handlers::get_user_list))
+        .route("/reader3/deleteUsers", post(handlers::delete_users))
+        .route("/reader3/addUser", post(handlers::add_user))
+        .route("/reader3/resetPassword", post(handlers::reset_password))
+        .route("/reader3/changePassword", post(handlers::change_password))
+        .route("/reader3/updateUser", post(handlers::update_user))
+        .route("/reader3/uploadFile", post(handlers::upload_file))
+        .route("/reader3/deleteFile", post(handlers::delete_file))
+        .route("/reader3/getTxtTocRules", get(handlers::get_txt_toc_rules))
+        .with_state(state.clone());
+
+    let web_root = state.config.web_root.clone();
+    let assets_root = state.config.assets_dir.clone();
+    let web_assets_root = PathBuf::from(&web_root).join("assets");
+
+    let static_web = Router::new()
+        .nest_service(
+            "/assets",
+            ServeDir::new(web_assets_root).not_found_service(ServeDir::new(assets_root)),
+        )
+        .fallback_service(ServeDir::new(web_root));
+
+    Router::new()
+        .merge(api)
+        .merge(static_web)
+        .layer(DefaultBodyLimit::max(100 * 1024 * 1024))
+        .layer(TraceLayer::new_for_http())
+        .layer(PropagateRequestIdLayer::x_request_id())
+        .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid::default()))
+        .layer(CorsLayer::very_permissive())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::config::AppConfig;
+    use crate::service::book_group_service::BookGroupService;
+    use crate::service::book_service::BookService;
+    use crate::service::book_source_service::BookSourceService;
+    use crate::service::chapter_update_service::ChapterUpdateService;
+    use crate::service::json_document_service::JsonDocumentService;
+    use crate::service::local_epub_book::LocalEpubBookService;
+    use crate::service::local_mobi_book::LocalMobiBookService;
+    use crate::service::local_pdf_book::LocalPdfBookService;
+    use crate::service::local_txt_book::LocalTxtBookService;
+    use crate::service::update_service::UpdateService;
+    use crate::service::user_service::UserService;
+    use crate::storage::cache::file_cache::FileCache;
+    use crate::storage::db;
+    use crate::storage::db::repo::BookSourceRepo;
+    use crate::util::crypto::random_string;
+    use reqwest::{Client, Method, StatusCode};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    async fn create_test_state() -> (AppState, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("reader-router-{}", random_string(8)));
+        std::fs::create_dir_all(&dir).unwrap();
+        let database_url = format!("sqlite:{}?mode=rwc", dir.join("reader.db").display());
+        let pool = db::init_pool(&database_url).await.unwrap();
+        let cfg = AppConfig {
+            storage_dir: dir.to_string_lossy().to_string(),
+            assets_dir: dir.join("assets").to_string_lossy().to_string(),
+            web_root: dir.join("web").to_string_lossy().to_string(),
+            database_url,
+            ..AppConfig::default()
+        };
+        let http =
+            crate::crawler::http_client::HttpClient::new(cfg.request_timeout_secs, None).unwrap();
+        let parser = crate::parser::rule_engine::RuleEngine::new().unwrap();
+        let cache = FileCache::new(format!("{}/cache", cfg.storage_dir));
+        let book_service = Arc::new(BookService::new(http, parser, cache, &cfg.storage_dir));
+        let book_source_service = Arc::new(BookSourceService::new(
+            BookSourceRepo::new(pool.clone()),
+            &cfg.storage_dir,
+        ));
+        let local_txt_book_service = Arc::new(LocalTxtBookService::new(&cfg.storage_dir));
+        let local_epub_book_service = Arc::new(LocalEpubBookService::new(&cfg.storage_dir));
+        let local_mobi_book_service = Arc::new(LocalMobiBookService::new(&cfg.storage_dir));
+        let local_pdf_book_service = Arc::new(LocalPdfBookService::new(&cfg.storage_dir));
+        let json_document_service =
+            Arc::new(JsonDocumentService::new(pool.clone(), &cfg.storage_dir));
+        let user_service = Arc::new(UserService::new(cfg.clone(), pool.clone()));
+        user_service.migrate_legacy_users_from_json().await.unwrap();
+        let book_group_service = Arc::new(BookGroupService::new(json_document_service.clone()));
+        let chapter_update_service = Arc::new(ChapterUpdateService::new(
+            book_service.clone(),
+            book_source_service.clone(),
+            user_service.clone(),
+            json_document_service.clone(),
+            cfg.chapter_update_interval_hours,
+            cfg.chapter_update_concurrency,
+        ));
+        let update_service = Arc::new(
+            UpdateService::new(
+                json_document_service.clone(),
+                cfg.request_timeout_secs,
+                format!("v{}", env!("CARGO_PKG_VERSION")),
+            )
+            .unwrap(),
+        );
+        let state = AppState {
+            config: cfg,
+            book_service,
+            book_source_service,
+            user_service,
+            book_group_service,
+            local_txt_book_service,
+            local_epub_book_service,
+            local_mobi_book_service,
+            local_pdf_book_service,
+            json_document_service,
+            chapter_update_service,
+            update_service,
+        };
+        (state, dir)
+    }
+
+    #[tokio::test]
+    async fn ai_routes_are_gone_and_chapter_update_routes_exist() {
+        let (state, dir) = create_test_state().await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, build_router(state)).await.unwrap();
+        });
+        let client = Client::new();
+        let base_url = format!("http://{}", addr);
+
+        for (method, path) in [
+            (Method::GET, "/reader3/ai/book/memory"),
+            (Method::POST, "/reader3/ai/proxy"),
+            (Method::GET, "/reader3/ai/chapter-summary"),
+            (Method::GET, "/reader3/ai/model/config"),
+        ] {
+            let response = client
+                .request(method.clone(), format!("{base_url}{path}"))
+                .send()
+                .await
+                .unwrap();
+            assert!(
+                matches!(
+                    response.status(),
+                    StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+                ),
+                "{method} {path} should be removed"
+            );
+        }
+
+        let status: serde_json::Value = client
+            .get(format!("{base_url}{CHAPTER_UPDATE_STATUS_ROUTE}"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(status["isSuccess"], true, "{status}");
+        assert_eq!(status["data"]["enabled"], true);
+        assert_eq!(status["data"]["intervalHours"], 24);
+
+        let check: serde_json::Value = client
+            .post(format!("{base_url}{CHAPTER_UPDATE_CHECK_ROUTE}"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(check["isSuccess"], true, "{check}");
+        assert_eq!(check["data"]["started"], true, "{check}");
+
+        // 等后台检查结束，再读状态里的结果（空书架：检查 0 本）
+        let mut report = serde_json::Value::Null;
+        for _ in 0..50 {
+            let status: serde_json::Value = client
+                .get(format!("{base_url}{CHAPTER_UPDATE_STATUS_ROUTE}"))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            if status["data"]["running"] == false && !status["data"]["report"].is_null() {
+                report = status["data"]["report"].clone();
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert_eq!(report["checked"], 0, "{report}");
+
+        server.abort();
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+}

@@ -1,0 +1,39 @@
+# Build artifacts
+target/
+**/target/
+# Dependencies
+node_modules/
+frontend/node_modules/
+docs/node_modules/
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Storage (will be created at runtime)
+storage/
+storage-docker/
+
+# Environment files
+.env
+.env.*
+
+# Documentation
+docs/.vitepress/cache/
+docs/.vitepress/dist/
+
+# Claude
+.claude/
+.agents/
+
+# Test / local reports
+
+# OS files
+.DS_Store
+Thumbs.db

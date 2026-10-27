@@ -1,0 +1,367 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { createPinia, setActivePinia } from 'pinia'
+import { useAppStore } from './app'
+import { useReaderStore } from './reader'
+import { getBookContent, getChapterList, getShelfBook, saveBookProgress } from '../api/bookshelf'
+import { getBrowserCachedChapter, setBrowserCachedChapter } from '../utils/browserCache'
+import type { Book } from '../types'
+
+vi.mock('../api/bookshelf', () => ({
+  getChapterList: vi.fn(),
+  getBookContent: vi.fn(),
+  getShelfBook: vi.fn(),
+  saveBookProgress: vi.fn(),
+  setBookSource: vi.fn(),
+}))
+
+vi.mock('../api/bookmark', () => ({
+  getBookmarks: vi.fn(),
+  saveBookmark: vi.fn(),
+  deleteBookmark: vi.fn(),
+  deleteBookmarks: vi.fn(),
+}))
+
+vi.mock('../api/replaceRule', () => ({
+  getReplaceRules: vi.fn(),
+}))
+
+vi.mock('../utils/browserCache', () => ({
+  getBrowserCachedChapter: vi.fn(),
+  setBrowserCachedChapter: vi.fn(),
+}))
+
+vi.mock('../utils/recentBooks', () => ({
+  saveRecentReadBook: vi.fn(),
+}))
+
+
+describe('reader local txt chapters', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    const storage = new Map<string, string>()
+    vi.stubGlobal('localStorage', {
+      getItem: vi.fn((key: string) => storage.get(key) ?? null),
+      setItem: vi.fn((key: string, value: string) => storage.set(key, value)),
+      removeItem: vi.fn((key: string) => storage.delete(key)),
+      clear: vi.fn(() => storage.clear()),
+    })
+    vi.mocked(getBookContent).mockReset()
+    vi.mocked(getChapterList).mockReset()
+    vi.mocked(getShelfBook).mockReset()
+    vi.mocked(saveBookProgress).mockReset()
+    vi.mocked(saveBookProgress).mockResolvedValue('ok')
+    vi.mocked(getBrowserCachedChapter).mockReset()
+    vi.mocked(setBrowserCachedChapter).mockReset()
+  })
+
+  it('switches chinese mode back to simplified after traditional conversion is loaded', async () => {
+    const readerStore = useReaderStore()
+    readerStore.content = '爱学习'
+
+    readerStore.updateConfig('chineseMode', 'traditional')
+    await vi.dynamicImportSettled()
+    expect(readerStore.displayContent).toBe('愛學習')
+
+    readerStore.updateConfig('chineseMode', 'simplified')
+
+    expect(readerStore.displayContent).toBe('爱学习')
+  })
+
+  it('fetches uploaded local txt content from backend even when browser reports offline', async () => {
+    vi.mocked(getBookContent).mockResolvedValue('本地正文')
+    vi.mocked(getBrowserCachedChapter).mockResolvedValue(null)
+    const appStore = useAppStore()
+    const readerStore = useReaderStore()
+    appStore.setOnlineStatus(false)
+    readerStore.book = {
+      name: '本地书',
+      author: '本地导入',
+      origin: 'local-txt',
+      bookUrl: 'local-txt:abc123',
+    }
+    readerStore.chapters = [
+      { title: '第一章', url: 'local-txt:abc123#0', index: 0 },
+    ]
+
+    await expect(readerStore.fetchChapterContent(0)).resolves.toBe('本地正文')
+
+    expect(getBrowserCachedChapter).not.toHaveBeenCalled()
+    expect(getBookContent).toHaveBeenCalledWith({
+      chapterUrl: 'local-txt:abc123#0',
+      bookSourceUrl: 'local-txt',
+      refresh: 0,
+    })
+  })
+
+  it('loads the latest server reading progress before opening a stale local book', async () => {
+    const staleBook: Book = {
+      name: '同步书',
+      author: '作者',
+      origin: 'source-1',
+      bookUrl: 'book-1',
+      durChapterIndex: 1,
+      durChapterPos: 1200,
+      durChapterTitle: '旧章节',
+    }
+    const serverBook: Book = {
+      ...staleBook,
+      durChapterIndex: 5,
+      durChapterPos: 7200,
+      durChapterTime: 1_765_000_000,
+      durChapterTitle: '新章节',
+    }
+    vi.mocked(getShelfBook).mockResolvedValue(serverBook)
+    vi.mocked(getChapterList).mockResolvedValue([
+      { title: '第1章', url: 'chapter-1', index: 0 },
+      { title: '第2章', url: 'chapter-2', index: 1 },
+      { title: '第3章', url: 'chapter-3', index: 2 },
+      { title: '第4章', url: 'chapter-4', index: 3 },
+      { title: '第5章', url: 'chapter-5', index: 4 },
+      { title: '第6章', url: 'chapter-6', index: 5 },
+    ])
+    const readerStore = useReaderStore()
+
+    await readerStore.loadBook(staleBook)
+
+    expect(getShelfBook).toHaveBeenCalledWith('book-1')
+    expect(readerStore.book?.durChapterIndex).toBe(5)
+    expect(readerStore.book?.durChapterPos).toBe(7200)
+    expect(readerStore.currentIndex).toBe(5)
+    expect(getChapterList).toHaveBeenCalledWith({
+      bookUrl: 'book-1',
+      bookSourceUrl: 'source-1',
+    })
+  })
+
+  it('keeps newer local session progress when opening a book from the shelf', async () => {
+    const serverBook: Book = {
+      name: '离线书',
+      author: '作者',
+      origin: 'source-1',
+      bookUrl: 'book-offline',
+      durChapterIndex: 2,
+      durChapterPos: 3000,
+      durChapterTime: 1_765_000_000,
+      durChapterTitle: '第3章',
+    }
+    const chapters = [
+      { title: '第1章', url: 'chapter-1', index: 0 },
+      { title: '第2章', url: 'chapter-2', index: 1 },
+      { title: '第3章', url: 'chapter-3', index: 2 },
+      { title: '第4章', url: 'chapter-4', index: 3 },
+      { title: '第5章', url: 'chapter-5', index: 4 },
+      { title: '第6章', url: 'chapter-6', index: 5 },
+    ]
+    // 离线读到了第 6 章，只存在本机会话里，时间比服务端的新
+    localStorage.setItem('reader-last-session', JSON.stringify({
+      book: serverBook,
+      chapters,
+      currentIndex: 5,
+      chapterScrollProgress: 0.5,
+      updatedAt: 1_765_000_500_000,
+    }))
+    vi.mocked(getShelfBook).mockResolvedValue(serverBook)
+    vi.mocked(getChapterList).mockResolvedValue(chapters)
+    const readerStore = useReaderStore()
+
+    await readerStore.loadBook(serverBook)
+
+    expect(readerStore.currentIndex).toBe(5)
+    expect(readerStore.book?.durChapterIndex).toBe(5)
+    expect(readerStore.book?.durChapterTime).toBe(1_765_000_500_000)
+  })
+
+  it('prefers newer server progress when restoring the persisted reader session', async () => {
+    const localBook: Book = {
+      name: '恢复书',
+      author: '作者',
+      origin: 'source-1',
+      bookUrl: 'book-restore',
+      durChapterIndex: 1,
+      durChapterPos: 1000,
+      durChapterTitle: '旧章节',
+    }
+    const serverBook: Book = {
+      ...localBook,
+      durChapterIndex: 4,
+      durChapterPos: 6400,
+      durChapterTime: 1_765_000_000,
+      durChapterTitle: '新章节',
+    }
+    const chapters = [
+      { title: '第1章', url: 'chapter-1', index: 0 },
+      { title: '第2章', url: 'chapter-2', index: 1 },
+      { title: '第3章', url: 'chapter-3', index: 2 },
+      { title: '第4章', url: 'chapter-4', index: 3 },
+      { title: '第5章', url: 'chapter-5', index: 4 },
+    ]
+    localStorage.setItem('reader-last-session', JSON.stringify({
+      book: localBook,
+      chapters,
+      currentIndex: 1,
+      chapterScrollProgress: 0.1,
+      updatedAt: 1_000,
+    }))
+    vi.mocked(getShelfBook).mockResolvedValue(serverBook)
+    vi.mocked(getChapterList).mockResolvedValue(chapters)
+    vi.mocked(getBookContent).mockResolvedValue('服务端进度章节正文')
+    vi.mocked(getBrowserCachedChapter).mockResolvedValue(null)
+    vi.mocked(setBrowserCachedChapter).mockResolvedValue(undefined)
+    const appStore = useAppStore()
+    appStore.setOnlineStatus(true)
+    const readerStore = useReaderStore()
+
+    const restored = await readerStore.restorePersistedSession()
+
+    expect(getShelfBook).toHaveBeenCalledWith('book-restore')
+    expect(getChapterList).toHaveBeenCalledWith({
+      bookUrl: 'book-restore',
+      bookSourceUrl: 'source-1',
+    })
+    expect(readerStore.chapters.length).toBe(5)
+    expect(getBrowserCachedChapter).toHaveBeenCalledWith('book-restore', 'chapter-5')
+    expect(getBookContent).toHaveBeenCalledWith({
+      chapterUrl: 'chapter-5',
+      bookSourceUrl: 'source-1',
+      refresh: 0,
+    })
+    expect(restored).toBe(true)
+    expect(readerStore.currentIndex).toBe(4)
+    expect(readerStore.book?.durChapterPos).toBe(6400)
+  })
+
+  it('keeps newer local session even when server has a deeper older chapter', async () => {
+    const localBook: Book = {
+      name: '恢复书',
+      author: '作者',
+      origin: 'source-1',
+      bookUrl: 'book-restore',
+      durChapterIndex: 0,
+      durChapterPos: 0,
+      durChapterTitle: '第1章',
+    }
+    const serverBook: Book = {
+      ...localBook,
+      durChapterIndex: 4,
+      durChapterPos: 6400,
+      durChapterTime: 1_765_000_000,
+      durChapterTitle: '第5章',
+    }
+    const chapters = [
+      { title: '第1章', url: 'chapter-1', index: 0 },
+      { title: '第2章', url: 'chapter-2', index: 1 },
+      { title: '第3章', url: 'chapter-3', index: 2 },
+      { title: '第4章', url: 'chapter-4', index: 3 },
+      { title: '第5章', url: 'chapter-5', index: 4 },
+    ]
+    localStorage.setItem('reader-last-session', JSON.stringify({
+      book: localBook,
+      chapters,
+      currentIndex: 0,
+      chapterScrollProgress: 0,
+      updatedAt: Date.now(),
+    }))
+    vi.mocked(getShelfBook).mockResolvedValue(serverBook)
+    vi.mocked(getChapterList).mockResolvedValue(chapters)
+    vi.mocked(getBookContent).mockResolvedValue('服务端进度章节正文')
+    vi.mocked(getBrowserCachedChapter).mockResolvedValue(null)
+    vi.mocked(setBrowserCachedChapter).mockResolvedValue(undefined)
+    useAppStore().setOnlineStatus(true)
+    const readerStore = useReaderStore()
+
+    const restored = await readerStore.restorePersistedSession()
+
+    expect(restored).toBe(true)
+    expect(readerStore.currentIndex).toBe(0)
+    expect(readerStore.book?.durChapterPos).toBe(0)
+    expect(getBookContent).toHaveBeenCalledWith({
+      chapterUrl: 'chapter-1',
+      bookSourceUrl: 'source-1',
+      refresh: 0,
+    })
+  })
+})
+
+describe('reader config migration', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    setActivePinia(createPinia())
+  })
+
+  it('drops settings left over from the removed AI panel', () => {
+    localStorage.setItem('readConfig', JSON.stringify({
+      fontSize: 20,
+      showAiPanel: true,
+      aiPanelLayout: 'side',
+      chapterSummaryKeyPointStyle: 'list',
+    }))
+    const store = useReaderStore()
+    expect(store.config.fontSize).toBe(20)
+    expect(store.config).not.toHaveProperty('showAiPanel')
+    expect(store.config).not.toHaveProperty('aiPanelLayout')
+    expect(store.config).not.toHaveProperty('chapterSummaryKeyPointStyle')
+  })
+
+  it('uses font size 20 on phones and 18 on larger screens by default', () => {
+    const originalWidth = window.innerWidth
+    try {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 })
+      setActivePinia(createPinia())
+      expect(useReaderStore().config.fontSize).toBe(20)
+
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1280 })
+      setActivePinia(createPinia())
+      const desktop = useReaderStore()
+      expect(desktop.config.fontSize).toBe(18)
+      expect(desktop.config.enablePreload).toBe(true)
+      desktop.updateConfig('fontSize', 24)
+      desktop.resetConfig()
+      expect(desktop.config.fontSize).toBe(18)
+    } finally {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth })
+    }
+  })
+
+  it('keeps only system speech settings', () => {
+    localStorage.setItem('reader-speechConfig', JSON.stringify({
+      provider: 'openai',
+      openaiApiKey: 'sk-test',
+      voiceName: 'Ting-Ting',
+      speechRate: 1.5,
+    }))
+    const store = useReaderStore()
+    expect(store.speechConfig.voiceName).toBe('Ting-Ting')
+    expect(store.speechConfig.speechRate).toBe(1.5)
+    expect(store.speechConfig).not.toHaveProperty('openaiApiKey')
+    expect(store.speechConfig).not.toHaveProperty('provider')
+  })
+})
+
+describe('reader next chapter', () => {
+  it('loads the next chapter content', async () => {
+    vi.mocked(getBookContent).mockResolvedValue('下一章正文')
+    vi.mocked(getBrowserCachedChapter).mockResolvedValue(null)
+    vi.mocked(setBrowserCachedChapter).mockResolvedValue(undefined)
+
+    const appStore = useAppStore()
+    appStore.setOnlineStatus(true)
+    const readerStore = useReaderStore()
+    readerStore.book = {
+      name: '测试书',
+      author: '作者',
+      origin: 'source-1',
+      bookUrl: 'book-1',
+    }
+    readerStore.chapters = [
+      { title: '第一章', url: 'chapter-1', index: 0 },
+      { title: '第二章', url: 'chapter-2', index: 1 },
+    ]
+    readerStore.currentIndex = 0
+    readerStore.content = '第一章正文'
+
+    await expect(readerStore.nextChapter()).resolves.toBeUndefined()
+
+    expect(readerStore.currentIndex).toBe(1)
+    expect(readerStore.content).toBe('下一章正文')
+  })
+})

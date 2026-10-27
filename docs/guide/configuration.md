@@ -1,0 +1,96 @@
+# 配置
+
+Reader Next 通过环境变量进行配置。默认配置定义在 `src/app/config.rs` 中。
+
+## 环境变量
+
+### 服务器配置
+
+| 变量名 | 默认值 | 说明 |
+|--------|--------|------|
+| `SERVER_HOST` | `0.0.0.0` | 服务器绑定地址 |
+| `SERVER_PORT` | `18080` | 服务器端口 |
+
+### 数据库配置
+
+| 变量名 | 默认值 | 说明 |
+|--------|--------|------|
+| `DATABASE_URL` | `sqlite:storage/reader.db?mode=rwc` | SQLite 数据库连接字符串 |
+
+### 存储配置
+
+| 变量名 | 默认值 | 说明 |
+|--------|--------|------|
+| `STORAGE_DIR` | `storage/` | 数据存储目录 |
+| `ASSETS_DIR` | `storage/assets` | 资源文件目录 |
+
+### Web 前端配置
+
+| 变量名 | 默认值 | 说明 |
+|--------|--------|------|
+| `WEB_ROOT` | `frontend/dist` | 静态 Web 文件目录 |
+
+### 安全配置
+
+| 变量名 | 默认值 | 说明 |
+|--------|--------|------|
+| `SECURE` | `false` | 是否启用安全模式 |
+| `SECURE_KEY` | 空 | 安全模式密钥 |
+
+### 用户配置
+
+| 变量名 | 默认值 | 说明 |
+|--------|--------|------|
+| `INVITE_CODE` | 空 | 注册邀请码，留空则不需要邀请码 |
+| `USER_LIMIT` | `50` | 最大用户数 |
+| `USER_BOOK_LIMIT` | `2000` | 每用户最大书籍数 |
+
+### 其他配置
+
+| 变量名 | 默认值 | 说明 |
+|--------|--------|------|
+| `LOG_LEVEL` | `info` | 日志级别 (trace, debug, info, warn, error) |
+| `REQUEST_TIMEOUT_SECS` | `15` | HTTP 请求超时时间(秒) |
+
+### 新章节自动检查
+
+| 变量名 | 默认值 | 说明 |
+|--------|--------|------|
+| `CHAPTER_UPDATE_INTERVAL_HOURS` | `24` | 自动检查书架新章节的间隔（小时），`0` 关闭自动检查 |
+| `CHAPTER_UPDATE_CONCURRENCY` | `3` | 同时检查的书源数量 |
+
+详见 [新章节自动检查](./chapter-update)。
+
+## 配置格式
+
+环境变量使用 `__`（双下划线）作为分隔符表示层级结构。
+
+例如，在嵌套配置中:
+```bash
+export APP__SERVER__PORT=3000
+```
+
+## 配置文件
+
+你也可以创建 `.env` 文件:
+
+```bash
+SERVER_PORT=18080
+DATABASE_URL=sqlite:storage/reader.db?mode=rwc
+LOG_LEVEL=debug
+SECURE=false
+INVITE_CODE=
+USER_LIMIT=50
+USER_BOOK_LIMIT=2000
+REQUEST_TIMEOUT_SECS=15
+CHAPTER_UPDATE_INTERVAL_HOURS=24
+```
+
+## 开发配置
+
+开发时建议:
+
+```bash
+LOG_LEVEL=debug
+cargo run
+```
