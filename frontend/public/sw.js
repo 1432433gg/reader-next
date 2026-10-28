@@ -1,15 +1,16 @@
-// 图标、favicon 这些文件名固定的资源会一直用缓存；换了它们发版时要改这里的版本号，旧缓存才会被清掉
-const SHELL_CACHE = 'reader-shell-v1-0-3'
-const RUNTIME_CACHE = 'reader-runtime-v1-0-3'
+// 图标、favicon 这些资源会一直用缓存；换了它们发版时要改这里的版本号，旧缓存才会被清掉
+// （图标地址里的 ?v= 也要一起加 1，见 index.html）
+const SHELL_CACHE = 'reader-shell-v1-1-2'
+const RUNTIME_CACHE = 'reader-runtime-v1-1-2'
 const SHELL_ASSETS = [
   '/',
   '/index.html',
   '/offline.html',
-  '/site.webmanifest',
+  '/site.webmanifest?v=2',
   '/favicon.ico',
-  '/favicon-32x32.png',
-  '/favicon-16x16.png',
-  '/apple-touch-icon.png',
+  '/favicon-32x32.png?v=2',
+  '/favicon-16x16.png?v=2',
+  '/apple-touch-icon.png?v=2',
 ]
 
 self.addEventListener('install', (event) => {
