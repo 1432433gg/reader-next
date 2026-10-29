@@ -17,9 +17,9 @@ const appStoreMock = {
   hasVersionUpdateReminder: true,
   versionUpdateLoading: false,
   versionUpdate: {
-    currentVersion: 'v1.0.9',
-    latestVersion: 'v1.0.10',
-    latestName: 'v1.0.10',
+    currentVersion: 'v1.2.3',
+    latestVersion: 'v1.2.4',
+    latestName: 'v1.2.4',
     releaseUrl: 'https://example.com/release',
     publishedAt: '2026-07-01T00:00:00Z',
     updateAvailable: true,

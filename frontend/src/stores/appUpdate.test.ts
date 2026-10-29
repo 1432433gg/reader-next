@@ -35,10 +35,10 @@ describe('app update reminders', () => {
 
   it('stores active release reminders and shows one admin toast', async () => {
     vi.mocked(getVersionUpdate).mockResolvedValue({
-      currentVersion: 'v1.0.5',
-      latestVersion: 'v1.0.6',
-      latestName: 'v1.0.6',
-      releaseUrl: 'https://github.com/Maple0517/reader-next/releases/tag/v1.0.6',
+      currentVersion: 'v1.2.3',
+      latestVersion: 'v1.2.4',
+      latestName: 'v1.2.4',
+      releaseUrl: 'https://example.com/release',
       publishedAt: '2026-05-15T08:00:00Z',
       updateAvailable: true,
       shouldRemind: true,
@@ -50,17 +50,17 @@ describe('app update reminders', () => {
 
     await store.checkVersionUpdate()
 
-    expect(store.versionUpdate?.latestVersion).toBe('v1.0.6')
+    expect(store.versionUpdate?.latestVersion).toBe('v1.2.4')
     expect(store.hasVersionUpdateReminder).toBe(true)
-    expect(store.toasts.map((toast) => toast.message)).toContain('发现服务端新版本 v1.0.6')
+    expect(store.toasts.map((toast) => toast.message)).toContain('发现服务端新版本 v1.2.4')
   })
 
   it('dismisses the current latest release reminder', async () => {
     vi.mocked(getVersionUpdate).mockResolvedValue({
-      currentVersion: 'v1.0.5',
-      latestVersion: 'v1.0.6',
-      latestName: 'v1.0.6',
-      releaseUrl: 'https://github.com/Maple0517/reader-next/releases/tag/v1.0.6',
+      currentVersion: 'v1.2.3',
+      latestVersion: 'v1.2.4',
+      latestName: 'v1.2.4',
+      releaseUrl: 'https://example.com/release',
       publishedAt: '2026-05-15T08:00:00Z',
       updateAvailable: true,
       shouldRemind: true,
@@ -69,14 +69,14 @@ describe('app update reminders', () => {
       error: null,
     })
     vi.mocked(dismissVersionUpdate).mockResolvedValue({
-      currentVersion: 'v1.0.5',
-      latestVersion: 'v1.0.6',
-      latestName: 'v1.0.6',
-      releaseUrl: 'https://github.com/Maple0517/reader-next/releases/tag/v1.0.6',
+      currentVersion: 'v1.2.3',
+      latestVersion: 'v1.2.4',
+      latestName: 'v1.2.4',
+      releaseUrl: 'https://example.com/release',
       publishedAt: '2026-05-15T08:00:00Z',
       updateAvailable: true,
       shouldRemind: false,
-      dismissedVersion: 'v1.0.6',
+      dismissedVersion: 'v1.2.4',
       checkedAt: 1_778_828_800,
       error: null,
     })
@@ -85,8 +85,8 @@ describe('app update reminders', () => {
 
     await store.dismissVersionUpdateReminder()
 
-    expect(dismissVersionUpdate).toHaveBeenCalledWith('v1.0.6')
+    expect(dismissVersionUpdate).toHaveBeenCalledWith('v1.2.4')
     expect(store.hasVersionUpdateReminder).toBe(false)
-    expect(store.versionUpdate?.dismissedVersion).toBe('v1.0.6')
+    expect(store.versionUpdate?.dismissedVersion).toBe('v1.2.4')
   })
 })

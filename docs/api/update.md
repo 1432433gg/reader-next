@@ -11,7 +11,7 @@ GET /reader3/getVersionUpdate
 {
   "success": true,
   "data": {
-    "version": "v1.0.6",
+    "version": "vX.Y.Z",
     "hasUpdate": true,
     "releaseUrl": "https://github.com/...",
     "releaseNotes": "更新说明..."
@@ -28,6 +28,6 @@ POST /reader3/dismissVersionUpdate
 请求体:
 ```json
 {
-  "version": "v1.0.6"
+  "version": "vX.Y.Z"
 }
 ```
