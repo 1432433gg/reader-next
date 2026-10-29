@@ -1,7 +1,7 @@
 // 图标、favicon 这些资源会一直用缓存；换了它们发版时要改这里的版本号，旧缓存才会被清掉
 // （图标地址里的 ?v= 也要一起加 1，见 index.html）
-const SHELL_CACHE = 'reader-shell-v1-1-2'
-const RUNTIME_CACHE = 'reader-runtime-v1-1-2'
+const SHELL_CACHE = 'reader-shell-v1-1-3'
+const RUNTIME_CACHE = 'reader-runtime-v1-1-3'
 const SHELL_ASSETS = [
   '/',
   '/index.html',
