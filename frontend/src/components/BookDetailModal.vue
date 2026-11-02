@@ -155,7 +155,7 @@ async function startReading() {
   if (!props.book) return
   const b = props.book as Book
   await shelfStore.moveBookToFront(b.bookUrl).catch(() => undefined)
-  await readerStore.loadBook(b)
+  if (!await readerStore.loadBook(b)) return
   await readerStore.loadChapter(readerStore.currentIndex)
   close()
   router.push('/reader')
@@ -165,7 +165,7 @@ async function readChapter(index: number) {
   if (!props.book) return
   const b = props.book as Book
   await shelfStore.moveBookToFront(b.bookUrl).catch(() => undefined)
-  await readerStore.loadBook(b)
+  if (!await readerStore.loadBook(b)) return
   await readerStore.loadChapter(index)
   close()
   router.push('/reader')

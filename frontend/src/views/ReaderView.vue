@@ -1760,7 +1760,7 @@ watch(() => store.loading, (loading) => {
   }
 })
 
-watch(() => store.book?.bookUrl, () => {
+watch(() => store.book, () => {
   loadSavedReadingPosition()
   scheduleRefreshOfflineCacheState()
 })

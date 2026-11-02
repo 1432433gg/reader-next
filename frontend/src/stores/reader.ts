@@ -215,6 +215,32 @@ export const useReaderStore = defineStore('reader', () => {
   const readChapterKeys = ref<Set<string>>(new Set())
   const progressDirty = ref(false)
   const lastServerProgressKey = ref('')
+  // 每次打开/清空书籍都递增；异步请求只能更新发起时的阅读会话。
+  const bookSessionId = ref(0)
+  let chapterRequestId = 0
+  let preloadTimer: ReturnType<typeof setTimeout> | null = null
+
+  function beginBookSession(nextBook: Book | null) {
+    bookSessionId.value += 1
+    chapterRequestId += 1
+    if (preloadTimer !== null) clearTimeout(preloadTimer)
+    preloadTimer = null
+    stopAutoReading()
+    stopTTS()
+    book.value = nextBook ? { ...nextBook } : null
+    chapters.value = []
+    content.value = ''
+    currentIndex.value = 0
+    chapterScrollProgress.value = 0
+    preloadedContent.value.clear()
+    bookmarks.value = []
+    readChapterKeys.value = new Set()
+    progressDirty.value = false
+    lastServerProgressKey.value = ''
+    loading.value = !!nextBook
+    chaptersLoading.value = !!nextBook
+    return bookSessionId.value
+  }
 
   const currentChapter = computed(() => chapters.value[currentIndex.value] || null)
   const hasNext = computed(() => currentIndex.value < chapters.value.length - 1)
@@ -436,16 +462,19 @@ export const useReaderStore = defineStore('reader', () => {
   }
 
   async function restorePersistedSession() {
+    // 进入阅读页时若已有明确的打开操作，不再恢复上一本书。
+    if (book.value || chaptersLoading.value) return false
     const session = getPersistedReaderSession()
     if (!session?.book || !session.chapters?.length) return false
 
-    loading.value = true
+    const sessionId = beginBookSession(session.book)
     let restoredBook = session.book
     let restoredChapters = session.chapters
     let nextIndex = Math.max(0, Math.min(session.currentIndex || 0, restoredChapters.length - 1))
     let nextProgress = session.chapterScrollProgress || 0
 
     const latestBook = await resolveLatestShelfBook(session.book)
+    if (sessionId !== bookSessionId.value) return false
     if (
       latestBook !== session.book
       && normalizeProgressTimestamp(latestBook.durChapterTime) > normalizeProgressTimestamp(session.updatedAt)
@@ -455,6 +484,7 @@ export const useReaderStore = defineStore('reader', () => {
         bookUrl: latestBook.bookUrl,
         bookSourceUrl: latestBook.origin,
       }).catch(() => session.chapters)
+      if (sessionId !== bookSessionId.value) return false
       nextIndex = Math.max(0, Math.min(restoredChapters.length - 1, latestBook.durChapterIndex || 0))
       nextProgress = decodeServerProgress(latestBook.durChapterPos)
     }
@@ -462,18 +492,19 @@ export const useReaderStore = defineStore('reader', () => {
     book.value = restoredBook
     currentIndex.value = nextIndex
     chapters.value = restoredChapters
+    chaptersLoading.value = false
     loadReadChapterHistory(restoredBook)
 
     try {
       const chapterContent = await fetchChapterContent(nextIndex)
-      if (chapterContent == null) return false
+      if (sessionId !== bookSessionId.value || chapterContent == null) return false
       setActiveChapterState(nextIndex, chapterContent, nextProgress)
       markChapterAsRead(nextIndex)
       return true
     } catch {
       return false
     } finally {
-      loading.value = false
+      if (sessionId === bookSessionId.value) loading.value = false
     }
   }
 
@@ -906,8 +937,10 @@ export const useReaderStore = defineStore('reader', () => {
 
   /* ─── Book / chapter ops ─── */
   async function loadBook(b: Book) {
-    loading.value = true
-    const latestBook = await resolveLatestShelfBook(b)
+    // 在第一次 await 前切换身份并清空正文，避免新阅读页挂载时使用旧书。
+    const sessionId = beginBookSession(b)
+    const latestBook = { ...await resolveLatestShelfBook(b) }
+    if (sessionId !== bookSessionId.value) return false
     // 离线读过的进度存不到服务端，只在本机的阅读会话里：比服务端的新就用它，
     // 打开章节后会标成待同步，下次自动保存时推到服务端。否则从书架打开会退回服务端的旧进度，
     // 再把旧进度存回去，离线读的那段就丢了。
@@ -921,30 +954,28 @@ export const useReaderStore = defineStore('reader', () => {
       latestBook.durChapterTime = session.updatedAt
     }
     book.value = latestBook
-    chapters.value = []
-    content.value = ''
     appStore.markBookOpened(latestBook.bookUrl)
     currentIndex.value = latestBook.durChapterIndex || 0
-    chapterScrollProgress.value = 0
-    preloadedContent.value.clear()
     loadReadChapterHistory(latestBook)
-    progressDirty.value = false
-    lastServerProgressKey.value = ''
-    chaptersLoading.value = true
     try {
-      chapters.value = await getChapterList({
+      const nextChapters = await getChapterList({
         bookUrl: latestBook.bookUrl,
         bookSourceUrl: latestBook.origin,
       })
+      if (sessionId !== bookSessionId.value) return false
+      chapters.value = nextChapters
       if (chapters.value.length) {
         currentIndex.value = Math.max(0, Math.min(currentIndex.value, chapters.value.length - 1))
       }
       saveReaderSession()
+      if (!chapters.value.length) loading.value = false
+      return true
     } catch (error) {
+      if (sessionId !== bookSessionId.value) return false
       loading.value = false
       throw error
     } finally {
-      chaptersLoading.value = false
+      if (sessionId === bookSessionId.value) chaptersLoading.value = false
     }
   }
 
@@ -973,9 +1004,11 @@ export const useReaderStore = defineStore('reader', () => {
   }
 
   async function persistProgress(index = currentIndex.value, progress = chapterScrollProgress.value) {
+    const sessionId = bookSessionId.value
     const payload = currentServerProgressPayload(index, progress)
     if (!payload) return
     await saveBookProgress(payload).then(() => {
+      if (sessionId !== bookSessionId.value) return
       progressDirty.value = false
       lastServerProgressKey.value = `${payload.bookUrl}::${payload.index}::${payload.position}`
     }).catch(() => undefined)
@@ -1015,18 +1048,21 @@ export const useReaderStore = defineStore('reader', () => {
 
   async function fetchChapterContent(index: number, forceRefresh = false) {
     if (!book.value || !chapters.value[index]) return null
+    const sessionId = bookSessionId.value
+    const currentBook = { ...book.value }
+    const chapter = chapters.value[index]
+    const isCurrent = () => sessionId === bookSessionId.value && chapters.value[index] === chapter
 
     if (!forceRefresh && preloadedContent.value.has(index)) {
       return preloadedContent.value.get(index) || null
     }
 
-    const chapter = chapters.value[index]
-
-    const isLocalTxt = isLocalTxtBook(book.value)
+    const isLocalTxt = isLocalTxtBook(currentBook)
     const useBrowserCache = !isLocalTxt
     const browserCached = useBrowserCache
-      ? await getBrowserCachedChapter(book.value.bookUrl, chapter.url).catch(() => null)
+      ? await getBrowserCachedChapter(currentBook.bookUrl, chapter.url).catch(() => null)
       : null
+    if (!isCurrent()) return null
 
     if (!forceRefresh && browserCached) {
       return browserCached
@@ -1043,36 +1079,41 @@ export const useReaderStore = defineStore('reader', () => {
     try {
       chapterContent = await getBookContent({
         chapterUrl: chapter.url,
-        bookSourceUrl: book.value.origin,
+        bookSourceUrl: currentBook.origin,
         refresh: forceRefresh ? 1 : 0,
       })
     } catch (error) {
+      if (!isCurrent()) return null
       if (browserCached) {
         appStore.showToast('网络请求失败，已切换到本地缓存章节', 'warning')
         return browserCached
       }
       throw error
     }
+    if (!isCurrent()) return null
 
     if (useBrowserCache) {
       await setBrowserCachedChapter({
-        bookUrl: book.value.bookUrl,
+        bookUrl: currentBook.bookUrl,
         chapterUrl: chapter.url,
         chapterTitle: chapter.title,
         content: chapterContent,
       }).catch(() => undefined)
     }
 
-    return chapterContent
+    return isCurrent() ? chapterContent : null
   }
 
   async function loadChapter(index: number, forceRefresh = false) {
     if (!book.value || !chapters.value[index]) return
+    const sessionId = bookSessionId.value
+    const requestId = ++chapterRequestId
+    const isCurrent = () => sessionId === bookSessionId.value && requestId === chapterRequestId
 
     loading.value = true
     try {
       const chapterContent = await fetchChapterContent(index, forceRefresh)
-      if (chapterContent == null) return
+      if (!isCurrent() || chapterContent == null) return
 
       const previousSavedIndex = book.value.durChapterIndex ?? 0
       const previousSavedProgress = decodeServerProgress(book.value.durChapterPos)
@@ -1087,25 +1128,35 @@ export const useReaderStore = defineStore('reader', () => {
         await persistProgress(index, 0)
       }
 
-      if (config.enablePreload) {
-        setTimeout(() => preloadAroundChapter(index), forceRefresh ? 1500 : 1000)
+      if (isCurrent() && config.enablePreload) {
+        if (preloadTimer !== null) clearTimeout(preloadTimer)
+        preloadTimer = setTimeout(() => {
+          preloadTimer = null
+          if (isCurrent()) void preloadAroundChapter(index)
+        }, forceRefresh ? 1500 : 1000)
       }
+    } catch (error) {
+      if (isCurrent()) throw error
     } finally {
-      loading.value = false
+      if (isCurrent()) loading.value = false
     }
   }
 
   async function preloadAroundChapter(index: number) {
     if (!book.value || !config.enablePreload) return
+    const sessionId = bookSessionId.value
     const targets = [index + 1, index + 2, index - 1]
       .filter((target, pos, list) => target >= 0 && target < chapters.value.length && list.indexOf(target) === pos)
     for (const target of targets) {
+      if (sessionId !== bookSessionId.value) return
       await preloadNextChapter(target)
     }
   }
 
   async function preloadNextChapter(index: number) {
     if (!book.value || !config.enablePreload || index >= chapters.value.length || preloadedContent.value.has(index)) return
+    const sessionId = bookSessionId.value
+    const chapter = chapters.value[index]
     
     // Keep max 3 preloaded chapters
     if (preloadedContent.value.size > 3) {
@@ -1115,7 +1166,7 @@ export const useReaderStore = defineStore('reader', () => {
 
     try {
       const res = await fetchChapterContent(index)
-      if (!res) return
+      if (!res || sessionId !== bookSessionId.value || chapters.value[index] !== chapter || !config.enablePreload) return
       preloadedContent.value.set(index, res)
     } catch { /* ignore */ }
   }
@@ -1149,6 +1200,7 @@ export const useReaderStore = defineStore('reader', () => {
   /* ─── Switch Source ─── */
   async function switchSource(newUrl: string, sourceUrl: string) {
     if (!book.value) return
+    let sessionId = bookSessionId.value
     const previousChapterTitle = currentChapter.value?.title || book.value.durChapterTitle
     const previousIndex = currentIndex.value
     const previousProgress = chapterScrollProgress.value
@@ -1159,52 +1211,70 @@ export const useReaderStore = defineStore('reader', () => {
         newUrl,
         bookSourceUrl: sourceUrl,
       })
-      if (!updatedBook) return null
+      if (sessionId !== bookSessionId.value || !updatedBook) return null
 
-      await loadBook(updatedBook)
+      const opening = loadBook(updatedBook)
+      sessionId = bookSessionId.value
+      if (!await opening) return null
       const targetIndex = resolveChapterIndexByTitle(
         chapters.value,
         previousChapterTitle,
         typeof updatedBook.durChapterIndex === 'number' ? updatedBook.durChapterIndex : previousIndex,
       )
       await loadChapter(targetIndex)
+      if (sessionId !== bookSessionId.value) return null
       setChapterScrollProgress(previousProgress)
       await shelfStore.fetchBooks().catch(() => undefined)
       return updatedBook
+    } catch (error) {
+      if (sessionId === bookSessionId.value) throw error
+      return null
     } finally {
-      loading.value = false
+      if (sessionId === bookSessionId.value) loading.value = false
     }
   }
 
   async function refreshContent() {
     if (!book.value || !chapters.value[currentIndex.value]) return
+    const sessionId = bookSessionId.value
+    const requestId = ++chapterRequestId
+    const index = currentIndex.value
+    const isCurrent = () => sessionId === bookSessionId.value && requestId === chapterRequestId
     loading.value = true
     try {
-      const chapterContent = await fetchChapterContent(currentIndex.value, true)
-      if (chapterContent == null) return
-      setActiveChapterState(currentIndex.value, chapterContent, chapterScrollProgress.value)
-      void preloadAroundChapter(currentIndex.value)
+      const chapterContent = await fetchChapterContent(index, true)
+      if (!isCurrent() || chapterContent == null) return
+      setActiveChapterState(index, chapterContent, chapterScrollProgress.value)
+      void preloadAroundChapter(index)
+    } catch (error) {
+      if (isCurrent()) throw error
     } finally {
-      loading.value = false
+      if (isCurrent()) loading.value = false
     }
   }
 
   async function refreshChapters() {
     if (!book.value) return
+    const sessionId = bookSessionId.value
     chaptersLoading.value = true
     try {
       preloadedContent.value.clear()
-      chapters.value = await getChapterList({
+      const nextChapters = await getChapterList({
         bookUrl: book.value.bookUrl,
         bookSourceUrl: book.value.origin,
         refresh: 1,
       })
+      if (sessionId !== bookSessionId.value) return
+      preloadedContent.value.clear()
+      chapters.value = nextChapters
       const targetIndex = Math.max(0, Math.min(chapters.value.length - 1, currentIndex.value))
       if (chapters.value[targetIndex]) {
         await loadChapter(targetIndex, true)
       }
+    } catch (error) {
+      if (sessionId === bookSessionId.value) throw error
     } finally {
-      chaptersLoading.value = false
+      if (sessionId === bookSessionId.value) chaptersLoading.value = false
     }
   }
 
@@ -1275,13 +1345,7 @@ export const useReaderStore = defineStore('reader', () => {
   }
 
   function clear() {
-    book.value = null
-    chapters.value = []
-    content.value = ''
-    currentIndex.value = 0
-    chapterScrollProgress.value = 0
-    readChapterKeys.value = new Set()
-    stopAutoReading()
+    beginBookSession(null)
   }
 
   /* ─── Panel visibility ─── */
@@ -1316,7 +1380,7 @@ export const useReaderStore = defineStore('reader', () => {
   }
 
   return {
-    book, chapters, currentIndex, content, loading, chaptersLoading,
+    book, bookSessionId, chapters, currentIndex, content, loading, chaptersLoading,
     currentChapter, hasNext, hasPrev, readingProgress,
       loadBook, loadChapter, fetchChapterContent, setActiveChapterState, refreshContent, nextChapter, prevChapter, clear,
       chapterScrollProgress, setChapterScrollProgress,

@@ -1,4 +1,4 @@
-import { nextTick, ref } from 'vue'
+import { nextTick, ref, watch } from 'vue'
 import type { ComputedRef, Ref } from 'vue'
 import type { useReaderStore } from '../stores/reader'
 
@@ -23,6 +23,13 @@ export function useContinuousReading(
   const continuousLoadingPrev = ref(false)
   const suppressContinuousSync = ref(false)
   let continuousStateSyncTimer: number | null = null
+  let generation = 0
+  let disposed = false
+  const stopSessionWatch = watch(() => store.bookSessionId, clearContinuousChapters, { flush: 'sync' })
+
+  function isCurrent(requestGeneration: number) {
+    return !disposed && requestGeneration === generation && isContinuousMode.value
+  }
 
   function shouldHideChapter(index: number, keepIndex?: number) {
     if (!hideReadChaptersMode.value) return false
@@ -45,10 +52,17 @@ export function useContinuousReading(
   }
 
   async function buildContinuousChapter(index: number, forceRefresh = false) {
+    const requestGeneration = generation
     const chapter = store.chapters[index]
     if (!chapter) return null
-    const chapterContent = await store.fetchChapterContent(index, forceRefresh)
-    if (chapterContent == null) return null
+    let chapterContent: string | null
+    try {
+      chapterContent = await store.fetchChapterContent(index, forceRefresh)
+    } catch (error) {
+      if (!isCurrent(requestGeneration)) return null
+      throw error
+    }
+    if (!isCurrent(requestGeneration) || chapterContent == null) return null
     return {
       index,
       title: chapter.title,
@@ -82,16 +96,19 @@ export function useContinuousReading(
   }
 
   async function initializeContinuousChapters(targetIndex = store.currentIndex, smooth = false) {
-    if (!isContinuousMode.value || !store.chapters[targetIndex]) return
+    if (disposed || !isContinuousMode.value || store.loading || store.chaptersLoading || !store.chapters[targetIndex]) return
+    clearContinuousChapters()
+    const requestGeneration = generation
 
     const current = await buildContinuousChapter(targetIndex)
-    if (!current) return
+    if (!isCurrent(requestGeneration) || !current) return
 
     continuousChapters.value = [current]
     const initialProgress = targetIndex === store.currentIndex ? store.chapterScrollProgress : 0
     setContinuousActiveChapter(targetIndex, current.content, initialProgress)
 
     await nextTick()
+    if (!isCurrent(requestGeneration)) return
     if (initialProgress <= 0) {
       scrollToContinuousChapter(targetIndex, smooth)
     }
@@ -103,10 +120,10 @@ export function useContinuousReading(
 
     void (async () => {
       const next = await buildContinuousChapter(nextIndex)
-      if (!next) return
+      if (!isCurrent(requestGeneration) || !next) return
       if (continuousChapters.value.some((chapter) => chapter.index === next.index)) return
       continuousChapters.value = [...continuousChapters.value, next]
-    })()
+    })().catch(() => undefined)
   }
 
   async function syncContinuousToStoreState() {
@@ -126,7 +143,8 @@ export function useContinuousReading(
   }
 
   async function loadContinuousNext() {
-    if (continuousLoadingNext.value || !continuousChapters.value.length) return
+    if (disposed || continuousLoadingNext.value || !continuousChapters.value.length) return
+    const requestGeneration = generation
     const last = continuousChapters.value[continuousChapters.value.length - 1]
     const nextIndex = hideReadChaptersMode.value ? findNextVisibleIndex(last.index + 1, store.currentIndex) : last.index + 1
     if (nextIndex >= store.chapters.length) return
@@ -134,17 +152,18 @@ export function useContinuousReading(
     continuousLoadingNext.value = true
     try {
       const next = await buildContinuousChapter(nextIndex)
-      if (next && !getContinuousChapter(next.index)) {
+      if (isCurrent(requestGeneration) && next && !getContinuousChapter(next.index)) {
         continuousChapters.value = [...continuousChapters.value, next]
       }
     } finally {
-      continuousLoadingNext.value = false
+      if (isCurrent(requestGeneration)) continuousLoadingNext.value = false
     }
   }
 
   async function loadContinuousPrev() {
-    if (hideReadChaptersMode.value) return
+    if (disposed || hideReadChaptersMode.value) return
     if (continuousLoadingPrev.value || !continuousChapters.value.length) return
+    const requestGeneration = generation
     const first = continuousChapters.value[0]
     const prevIndex = first.index - 1
     if (prevIndex < 0) return
@@ -156,16 +175,16 @@ export function useContinuousReading(
     continuousLoadingPrev.value = true
     try {
       const prev = await buildContinuousChapter(prevIndex)
-      if (prev && !getContinuousChapter(prev.index)) {
+      if (isCurrent(requestGeneration) && prev && !getContinuousChapter(prev.index)) {
         continuousChapters.value = [prev, ...continuousChapters.value]
         await nextTick()
-        if (container) {
+        if (isCurrent(requestGeneration) && container) {
           const heightDiff = container.scrollHeight - previousHeight
           container.scrollTop = previousTop + heightDiff
         }
       }
     } finally {
-      continuousLoadingPrev.value = false
+      if (isCurrent(requestGeneration)) continuousLoadingPrev.value = false
     }
   }
 
@@ -176,15 +195,20 @@ export function useContinuousReading(
       return
     }
 
-    while (continuousChapters.value[0] && index < continuousChapters.value[0].index) {
+    const requestGeneration = generation
+    while (isCurrent(requestGeneration) && continuousChapters.value[0] && index < continuousChapters.value[0].index) {
+      const firstIndex = continuousChapters.value[0].index
       await loadContinuousPrev()
+      if (continuousChapters.value[0]?.index === firstIndex) break
     }
 
     while (
-      continuousChapters.value[continuousChapters.value.length - 1]
+      isCurrent(requestGeneration) && continuousChapters.value[continuousChapters.value.length - 1]
       && index > continuousChapters.value[continuousChapters.value.length - 1].index
     ) {
+      const lastIndex = continuousChapters.value[continuousChapters.value.length - 1].index
       await loadContinuousNext()
+      if (continuousChapters.value[continuousChapters.value.length - 1]?.index === lastIndex) break
     }
   }
 
@@ -206,14 +230,19 @@ export function useContinuousReading(
   }
 
   function clearContinuousChapters() {
+    generation += 1
     continuousChapters.value = []
+    continuousLoadingNext.value = false
+    continuousLoadingPrev.value = false
+    suppressContinuousSync.value = false
+    if (continuousStateSyncTimer) clearTimeout(continuousStateSyncTimer)
+    continuousStateSyncTimer = null
   }
 
   function disposeContinuousReading() {
-    if (continuousStateSyncTimer) {
-      clearTimeout(continuousStateSyncTimer)
-      continuousStateSyncTimer = null
-    }
+    disposed = true
+    stopSessionWatch()
+    clearContinuousChapters()
   }
 
   return {

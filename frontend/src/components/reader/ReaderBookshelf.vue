@@ -46,8 +46,7 @@ if (!store.books.length) {
 
 async function openBook(book: Book) {
   if (book.bookUrl !== readerStore.book?.bookUrl) {
-    readerStore.clear()
-    await readerStore.loadBook(book)
+    if (!await readerStore.loadBook(book)) return
     await readerStore.loadChapter(readerStore.currentIndex)
   }
   readerStore.closePanel()
