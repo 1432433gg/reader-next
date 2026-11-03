@@ -7,7 +7,12 @@
     />
 
     <!-- Normal Bookshelf View -->
-    <div v-else class="shelf-content">
+    <div
+      v-else
+      class="shelf-content"
+      :class="{ 'has-batch-toolbar': showBatchToolbar }"
+      :style="{ '--batch-toolbar-height': `${batchToolbarHeight}px` }"
+    >
       <!-- Shelf Header -->
       <div class="shelf-header">
         <h1 class="shelf-title">
@@ -137,7 +142,7 @@
 
       <!-- Batch Toolbar -->
       <Transition name="slide-up">
-        <div v-if="shelfStore.editMode && shelfStore.selectedBookUrls.size > 0" class="batch-toolbar">
+        <div v-if="showBatchToolbar" ref="batchToolbarRef" class="batch-toolbar">
           <div class="batch-info">
             已选中 <span>{{ shelfStore.selectedBookUrls.size }}</span> 本书
           </div>
@@ -185,6 +190,7 @@ import GroupSelectModal from '../components/bookshelf/GroupSelectModal.vue'
 import GroupManagerModal from '../components/bookshelf/GroupManagerModal.vue'
 import SearchResults from '../components/SearchResults.vue'
 import CacheLibraryModal from '../components/CacheLibraryModal.vue'
+import { useElementHeight } from '../composables/useElementHeight'
 import type { Book, SearchBook } from '../types'
 
 const router = useRouter()
@@ -200,6 +206,9 @@ const selectedBook = ref<Book | SearchBook | null>(null)
 const openingBookUrl = ref('')
 const txtFileInputRef = ref<HTMLInputElement | null>(null)
 const txtUploading = ref(false)
+const showBatchToolbar = computed(() => shelfStore.editMode && shelfStore.selectedBookUrls.size > 0)
+const batchToolbarRef = ref<HTMLElement | null>(null)
+const batchToolbarHeight = useElementHeight(batchToolbarRef)
 
 onMounted(async () => {
   await appStore.fetchUserInfo()
@@ -505,9 +514,13 @@ async function handleRefreshBooks() {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding-bottom: calc(104px + var(--space-6));
+  padding-bottom: var(--space-4);
   scrollbar-width: none;
   -ms-overflow-style: none;
+}
+
+.has-batch-toolbar .shelf-grid-wrapper {
+  padding-bottom: calc(var(--batch-toolbar-height, 70px) + var(--space-4));
 }
 
 .shelf-grid-wrapper::-webkit-scrollbar {
@@ -516,17 +529,18 @@ async function handleRefreshBooks() {
 
 .batch-toolbar {
   position: fixed;
-  bottom: calc(104px + var(--space-4));
+  bottom: var(--bottom-nav-space);
   left: 50%;
   transform: translateX(-50%);
   background: var(--color-bg-elevated);
   border: 1px solid var(--color-border);
   box-shadow: var(--shadow-xl);
-  border-radius: var(--radius-2xl);
+  border-radius: var(--radius-xl);
   padding: var(--space-3) var(--space-6);
   display: flex;
   align-items: center;
   gap: var(--space-8);
+  max-width: calc(100% - var(--space-8) - var(--safe-area-left) - var(--safe-area-right));
   z-index: calc(var(--z-sticky) + 5);
   backdrop-filter: blur(12px);
 }
@@ -642,10 +656,12 @@ async function handleRefreshBooks() {
 
   .batch-toolbar {
     width: calc(100% - var(--space-8));
-    bottom: calc(104px + var(--space-3));
     gap: var(--space-4);
     justify-content: space-between;
+    padding: var(--space-3);
   }
   .batch-info { display: none; }
+  .batch-actions { width: 100%; flex-wrap: wrap; }
+  .batch-btn { flex: 1; justify-content: center; min-height: 44px; white-space: nowrap; }
 }
 </style>

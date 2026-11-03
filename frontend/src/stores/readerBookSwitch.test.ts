@@ -11,6 +11,7 @@ import { useContinuousReading } from '../composables/useContinuousReading'
 import ReaderView from '../views/ReaderView.vue'
 import { getBookmarks } from '../api/bookmark'
 import { getReplaceRules } from '../api/replaceRule'
+import { cacheBookToBrowser } from '../utils/bookCache'
 import type { Book } from '../types'
 
 vi.mock('../api/bookshelf', () => ({
@@ -368,4 +369,30 @@ describe('reader view book switching', () => {
       }
     },
   )
+})
+
+// A book's detail page and its chapter URLs need not share a path or host.
+describe('explicit cache ownership', () => {
+  it('sends book identity for reading, preloading and forced refresh', async () => {
+    const store = useReaderStore()
+    const chapter = { index: 0, title: '第一章', url: 'https://cdn.example/text/42' }
+    vi.mocked(getChapterList).mockResolvedValue([chapter])
+    // Searching and reading before adding to the shelf must still identify the book.
+    vi.mocked(getShelfBook).mockRejectedValueOnce(new Error('not on shelf'))
+    await store.loadBook(first)
+    await store.loadChapter(0)
+    await store.preloadNextChapter(0)
+    await store.refreshContent()
+    for (const [request] of vi.mocked(getBookContent).mock.calls) {
+      expect(request).toEqual(expect.objectContaining({ bookUrl: first.bookUrl, chapterUrl: chapter.url }))
+    }
+  })
+
+  it('sends the same identity when downloading chapters for offline reading', async () => {
+    await cacheBookToBrowser({ book: second, chapters: chaptersFor(second.bookUrl), count: 2 })
+    expect(getBookContent).toHaveBeenCalledTimes(2)
+    for (const [request] of vi.mocked(getBookContent).mock.calls) {
+      expect(request).toEqual(expect.objectContaining({ bookUrl: second.bookUrl }))
+    }
+  })
 })

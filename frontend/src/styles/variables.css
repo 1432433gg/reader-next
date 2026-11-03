@@ -91,8 +91,11 @@
   --tabs-height: 44px;
   --sidebar-width: 360px;
   --content-max-width: 1400px;
-  /* 悬浮底栏占掉的高度（底栏离屏幕底边的距离 + 底栏高度 + 12px 间距），页面内容靠它留出底部空间 */
-  --bottom-nav-space: calc(104px + var(--safe-area-bottom));
+  /* 悬浮底栏占掉的高度（底栏离屏幕底边的距离 + 底栏高度 + 10px 间距），页面内容靠它留出底部空间 */
+  --bottom-nav-offset: calc(18px + var(--safe-area-bottom));
+  --bottom-nav-height: 80px;
+  --bottom-nav-gap: 10px;
+  --bottom-nav-space: calc(var(--bottom-nav-offset) + var(--bottom-nav-height) + var(--bottom-nav-gap));
 
   /* Transitions */
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
@@ -112,7 +115,8 @@
 /* 手机上底栏压进安全区一部分（见 AppBottomNav.vue），底栏高 70px */
 @media (max-width: 640px) {
   :root {
-    --bottom-nav-space: calc(max(12px, var(--safe-area-bottom) - 10px) + 82px);
+    --bottom-nav-offset: max(12px, calc(var(--safe-area-bottom) - 10px));
+    --bottom-nav-height: 70px;
   }
 }
 

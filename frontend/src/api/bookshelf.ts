@@ -75,6 +75,7 @@ export function getChapterList(params: {
 }
 
 export function getBookContent(params: {
+  bookUrl?: string
   chapterUrl?: string
   bookSourceUrl?: string
   index?: number

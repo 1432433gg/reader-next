@@ -87,6 +87,7 @@ describe('reader local txt chapters', () => {
 
     expect(getBrowserCachedChapter).not.toHaveBeenCalled()
     expect(getBookContent).toHaveBeenCalledWith({
+      bookUrl: 'local-txt:abc123',
       chapterUrl: 'local-txt:abc123#0',
       bookSourceUrl: 'local-txt',
       refresh: 0,
@@ -221,6 +222,7 @@ describe('reader local txt chapters', () => {
     expect(readerStore.chapters.length).toBe(5)
     expect(getBrowserCachedChapter).toHaveBeenCalledWith('book-restore', 'chapter-5')
     expect(getBookContent).toHaveBeenCalledWith({
+      bookUrl: 'book-restore',
       chapterUrl: 'chapter-5',
       bookSourceUrl: 'source-1',
       refresh: 0,
@@ -275,6 +277,7 @@ describe('reader local txt chapters', () => {
     expect(readerStore.currentIndex).toBe(0)
     expect(readerStore.book?.durChapterPos).toBe(0)
     expect(getBookContent).toHaveBeenCalledWith({
+      bookUrl: 'book-restore',
       chapterUrl: 'chapter-1',
       bookSourceUrl: 'source-1',
       refresh: 0,

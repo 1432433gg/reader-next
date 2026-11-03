@@ -33,6 +33,7 @@ export async function cacheBookToBrowser(params: {
       break
     }
     const content = await getBookContent({
+      bookUrl: params.book.bookUrl,
       chapterUrl: chapter.url,
       bookSourceUrl: params.book.origin,
     })

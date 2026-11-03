@@ -553,6 +553,8 @@ impl BookService {
             chapter_url,
             book_key
         );
+        self.restore_legacy_chapter_cache(user_ns, book_url, chapter_url)
+            .await;
         if let Ok(Some(cached)) = self.cache.get(user_ns, &book_key, chapter_url).await {
             tracing::debug!("get_content returning cached content, len={}", cached.len());
             return Ok(cached);
@@ -611,12 +613,68 @@ impl BookService {
         Ok(all_content)
     }
 
+    // Older clients without bookUrl could store a chapter under its own URL.
+    // Move only that exact chapter, never infer ownership from a shared URL prefix.
+    async fn restore_legacy_chapter_cache(&self, user_ns: &str, book_url: &str, chapter_url: &str) {
+        let book_key = md5_hex(book_url);
+        let legacy_key = md5_hex(chapter_url);
+        if book_key == legacy_key || self.cache.exists(user_ns, &book_key, chapter_url).await {
+            return;
+        }
+        if let Ok(Some(content)) = self.cache.get(user_ns, &legacy_key, chapter_url).await {
+            if self
+                .cache
+                .put(user_ns, &book_key, chapter_url, &content)
+                .await
+                .is_ok()
+            {
+                let _ = self.cache.remove(user_ns, &legacy_key, chapter_url).await;
+            }
+        }
+    }
+
+    pub async fn delete_chapter_content_cache(
+        &self,
+        user_ns: &str,
+        book_url: &str,
+        chapter_url: &str,
+    ) -> Result<(), AppError> {
+        for key in [md5_hex(book_url), md5_hex(chapter_url)] {
+            self.cache
+                .remove(user_ns, &key, chapter_url)
+                .await
+                .map_err(|e| AppError::Internal(e.into()))?;
+        }
+        Ok(())
+    }
+
     /// Delete all chapter content cache for a book
     pub async fn delete_book_cache(&self, user_ns: &str, book_url: &str) -> Result<bool, AppError> {
+        // Remove old chapter-keyed files too, so they cannot reappear after a clear.
+        let mut deleted_legacy = false;
+        let mut toc_urls = vec![book_url.to_string()];
+        if let Some(book) = self.get_shelf_book(user_ns, book_url).await? {
+            if let Some(toc_url) = book.toc_url {
+                toc_urls.push(toc_url);
+            }
+        }
+        for toc_url in toc_urls {
+            if let Some(chapters) = self.load_chapter_list_cache(user_ns, &toc_url).await? {
+                for chapter in chapters {
+                    deleted_legacy |= self
+                        .cache
+                        .exists(user_ns, &md5_hex(&chapter.url), &chapter.url)
+                        .await;
+                    self.delete_chapter_content_cache(user_ns, book_url, &chapter.url)
+                        .await?;
+                }
+            }
+        }
         let book_key = md5_hex(book_url);
         self.cache
             .remove_book(user_ns, &book_key)
             .await
+            .map(|deleted| deleted || deleted_legacy)
             .map_err(|e| AppError::Internal(e.into()))
     }
 
@@ -627,6 +685,8 @@ impl BookService {
         book_url: &str,
         chapter_url: &str,
     ) -> bool {
+        self.restore_legacy_chapter_cache(user_ns, book_url, chapter_url)
+            .await;
         let book_key = md5_hex(book_url);
         self.cache.exists(user_ns, &book_key, chapter_url).await
     }
@@ -848,10 +908,9 @@ impl BookService {
         book_url: &str,
         chapter_urls: &[String],
     ) -> Result<usize, AppError> {
-        let book_key = md5_hex(book_url);
         let mut count = 0usize;
-        for url in chapter_urls {
-            if self.cache.exists(user_ns, &book_key, url).await {
+        for url in chapter_urls.iter().collect::<HashSet<_>>() {
+            if self.is_chapter_cached(user_ns, book_url, url).await {
                 count += 1;
             }
         }
@@ -866,9 +925,9 @@ impl BookService {
         chapter_url: &str,
         refresh: bool,
     ) -> Result<(), AppError> {
-        let book_key = md5_hex(book_url);
         if refresh {
-            let _ = self.cache.remove(user_ns, &book_key, chapter_url).await;
+            self.delete_chapter_content_cache(user_ns, book_url, chapter_url)
+                .await?;
         }
         let _ = self
             .get_content(user_ns, book_url, source, chapter_url)
@@ -1860,6 +1919,128 @@ mod tests {
             storage_dir.to_str().unwrap(),
         );
         (service, storage_dir)
+    }
+
+    #[tokio::test]
+    async fn cache_ownership_restores_legacy_and_counts_each_chapter_once() {
+        let (service, dir) = test_book_service("cache-ownership-legacy");
+        let book_url = "https://source.example/detail/7";
+        let chapter_url = "https://cdn.example/read/42";
+        service
+            .cache
+            .put("u", &md5_hex(chapter_url), chapter_url, "old content")
+            .await
+            .unwrap();
+        assert_eq!(
+            service
+                .cached_chapter_count("u", book_url, &[chapter_url.into(), chapter_url.into()])
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            service
+                .get_content("u", book_url, &BookSource::default(), chapter_url)
+                .await
+                .unwrap(),
+            "old content"
+        );
+        assert!(
+            service
+                .cache
+                .exists("u", &md5_hex(book_url), chapter_url)
+                .await
+        );
+        assert!(
+            !service
+                .cache
+                .exists("u", &md5_hex(chapter_url), chapter_url)
+                .await
+        );
+        assert_eq!(
+            service
+                .cached_chapter_count("other-user", book_url, &[chapter_url.into()])
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            service
+                .cached_chapter_count("u", "another-book", &[chapter_url.into()])
+                .await
+                .unwrap(),
+            0
+        );
+        fs::remove_dir_all(dir).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cache_ownership_prefers_canonical_and_refresh_clears_both_copies() {
+        let (service, dir) = test_book_service("cache-ownership-refresh");
+        let book_url = "https://source.example/detail/7";
+        let chapter_url = "https://cdn.example/read/42";
+        service
+            .cache
+            .put("u", &md5_hex(chapter_url), chapter_url, "old")
+            .await
+            .unwrap();
+        service
+            .cache
+            .put("u", &md5_hex(book_url), chapter_url, "new")
+            .await
+            .unwrap();
+        assert_eq!(
+            service
+                .get_content("u", book_url, &BookSource::default(), chapter_url)
+                .await
+                .unwrap(),
+            "new"
+        );
+        service
+            .delete_chapter_content_cache("u", book_url, chapter_url)
+            .await
+            .unwrap();
+        assert!(!service.is_chapter_cached("u", book_url, chapter_url).await);
+        fs::remove_dir_all(dir).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cache_ownership_clear_removes_legacy_without_touching_other_books() {
+        let (service, dir) = test_book_service("cache-ownership-clear");
+        let book_url = "https://source.example/detail/7";
+        let chapter_url = "https://cdn.example/read/42";
+        let chapters = vec![BookChapter {
+            url: chapter_url.into(),
+            ..Default::default()
+        }];
+        service
+            .save_chapter_list_cache("u", book_url, &chapters)
+            .await
+            .unwrap();
+        service
+            .cache
+            .put("u", &md5_hex(chapter_url), chapter_url, "old")
+            .await
+            .unwrap();
+        service
+            .cache
+            .put("u", &md5_hex("other-book"), "other-chapter", "keep")
+            .await
+            .unwrap();
+        assert!(service.delete_book_cache("u", book_url).await.unwrap());
+        assert_eq!(
+            service
+                .cached_chapter_count("u", book_url, &[chapter_url.into()])
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(
+            service
+                .is_chapter_cached("u", "other-book", "other-chapter")
+                .await
+        );
+        fs::remove_dir_all(dir).await.unwrap();
     }
 
     fn test_book(chapter_index: i32, chapter_pos: i32, chapter_time: i64) -> Book {

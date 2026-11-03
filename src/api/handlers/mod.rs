@@ -42,3 +42,6 @@ use axum::Json;
 pub async fn health() -> impl IntoResponse {
     Json(ApiResponse::ok("ok"))
 }
+
+#[cfg(test)]
+mod book_cache_tests;

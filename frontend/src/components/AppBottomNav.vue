@@ -34,6 +34,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useElementHeight } from '../composables/useElementHeight'
 import { useRoute, useRouter } from 'vue-router'
 import { useAppStore } from '../stores/app'
 
@@ -71,6 +72,11 @@ const items: Array<{ key: NavKey; label: string; path: string; paths: string[] }
 ]
 
 const navRef = ref<HTMLElement | null>(null)
+const navHeight = useElementHeight(navRef)
+watch(navHeight, (height) => {
+  if (height > 0) document.documentElement.style.setProperty('--bottom-nav-height', `${height}px`)
+})
+onBeforeUnmount(() => document.documentElement.style.removeProperty('--bottom-nav-height'))
 const itemRefs = ref<Record<NavKey, HTMLElement | null>>({
   home: null,
   explore: null,
@@ -251,7 +257,7 @@ onBeforeUnmount(() => {
 .bottom-nav-shell {
   position: fixed;
   left: 50%;
-  bottom: calc(18px + var(--safe-area-bottom));
+  bottom: var(--bottom-nav-offset);
   transform: translateX(-50%);
   z-index: calc(var(--z-sticky) + 2);
   width: min(720px, calc(100vw - 24px));
@@ -321,6 +327,7 @@ onBeforeUnmount(() => {
   justify-content: center;
   gap: 8px;
   min-height: 58px;
+  white-space: nowrap;
   border-radius: 999px;
   color: #22242a;
   font-size: var(--text-sm);
@@ -358,11 +365,6 @@ onBeforeUnmount(() => {
 @media (max-width: 640px) {
   .bottom-nav-shell {
     width: calc(100vw - 18px);
-    /*
-     * 手机上压进底部安全区一部分：iPhone 安全区 34px，底栏离屏幕底边 24px，刚好在 Home 横条上方；
-     * 没有横条的设备安全区是 0，还是 12px。改这里要连 variables.css 的 --bottom-nav-space 一起改。
-     */
-    bottom: max(12px, calc(var(--safe-area-bottom) - 10px));
   }
 
   .bottom-nav {

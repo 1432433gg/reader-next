@@ -117,6 +117,8 @@ pub struct ChapterListRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct BookContentRequest {
+    #[serde(rename = "bookUrl")]
+    pub book_url: Option<String>,
     #[serde(rename = "chapterUrl", alias = "url", alias = "href")]
     pub chapter_url: Option<String>,
     #[serde(rename = "bookSourceUrl", alias = "origin")]
@@ -1115,6 +1117,9 @@ pub async fn get_book_content(
     if !body.is_empty() {
         if let Ok(v) = serde_json::from_slice::<BookContentRequest>(&body) {
             // Merge with query params
+            if req.book_url.is_none() {
+                req.book_url = v.book_url;
+            }
             if req.chapter_url.is_none() {
                 req.chapter_url = v.chapter_url;
             }
@@ -1133,6 +1138,7 @@ pub async fn get_book_content(
         } else if let Ok(s) = std::str::from_utf8(&body) {
             for (k, v) in url::form_urlencoded::parse(s.as_bytes()) {
                 match k.as_ref() {
+                    "bookUrl" => req.book_url = Some(v.into_owned()),
                     "chapterUrl" | "href" => req.chapter_url = Some(v.into_owned()),
                     "bookSourceUrl" | "origin" => req.book_source_url = Some(v.into_owned()),
                     "index" => req.index = v.parse().ok(),
@@ -1253,7 +1259,13 @@ pub async fn get_book_content(
     // Determine book_url and chapter_url
     let (book_url, chapter_url) = if let Some(url) = &req.chapter_url {
         // Check if url looks like a book URL (not a chapter URL) and we have an index
-        if req.index.is_some() && !url.contains("/read/") && !url.contains("/chapter/") {
+        if let Some(book_url) = req
+            .book_url
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            (book_url.to_string(), url.clone())
+        } else if req.index.is_some() && !url.contains("/read/") && !url.contains("/chapter/") {
             // url is bookUrl, need to get chapter from index
             let source = resolve_book_source(
                 &state,
@@ -1335,7 +1347,7 @@ pub async fn get_book_content(
     if do_refresh {
         let _ = state
             .book_service
-            .delete_book_cache(&user_ns, &book_url)
+            .delete_chapter_content_cache(&user_ns, &book_url, &chapter_url)
             .await;
     }
 
@@ -3468,6 +3480,33 @@ fn take_available_source_sse_matches(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn content_request_accepts_explicit_book_identity_and_legacy_clients() {
+        let request: super::BookContentRequest = serde_json::from_value(serde_json::json!({
+            "bookUrl": "https://source.example/detail/7",
+            "chapterUrl": "https://cdn.example/text/42",
+            "bookSourceUrl": "https://source.example"
+        }))
+        .unwrap();
+        assert_eq!(
+            request.book_url.as_deref(),
+            Some("https://source.example/detail/7")
+        );
+        assert_eq!(
+            request.chapter_url.as_deref(),
+            Some("https://cdn.example/text/42")
+        );
+        let legacy: super::BookContentRequest = serde_json::from_value(serde_json::json!({
+            "url": "https://source.example/chapter/42", "index": 0
+        }))
+        .unwrap();
+        assert!(legacy.book_url.is_none());
+        assert_eq!(
+            legacy.chapter_url.as_deref(),
+            Some("https://source.example/chapter/42")
+        );
+    }
+
     use super::{
         book_matches_delete_target, build_available_book_source_response,
         cache_count_for_shelf_display, fallback_available_book, merge_global_explore_books,
