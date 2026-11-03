@@ -21,6 +21,7 @@
         :src="coverSrc"
         :alt="book.name"
         class="cover-img"
+        :class="{ 'custom-cover-img': asBook.customCoverUrl }"
         loading="lazy"
         @error="coverFailed = true"
       />
@@ -100,7 +101,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { getCoverUrl } from '../api/bookshelf'
 import { isLocalTxtBook } from '../utils/localBook'
 import { useBookshelfStore } from '../stores/bookshelf'
@@ -140,6 +141,9 @@ function handleCoverClick() {
 }
 
 const coverFailed = ref(false)
+watch(() => [(props.book as Book).customCoverUrl, props.book.coverUrl, props.book.bookUrl], () => {
+  coverFailed.value = false
+})
 
 const asBook = computed(() => props.book as Book)
 const asSearchBook = computed(() => props.book as SearchBook)
@@ -258,6 +262,8 @@ const newChapterCount = computed(() => {
   height: 100%;
   object-fit: cover;
 }
+
+.cover-img.custom-cover-img { object-fit: contain; }
 
 .cover-placeholder {
   width: 100%;

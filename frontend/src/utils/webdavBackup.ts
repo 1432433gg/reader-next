@@ -1,3 +1,4 @@
+import { captureCustomCovers, restoreCustomCovers, validateCustomCoverBackup, type CustomCoverBackup } from './customCoverBackup'
 import { getBookmarks, deleteBookmarks, saveBookmarks } from '../api/bookmark'
 import {
   deleteBookGroup,
@@ -16,7 +17,7 @@ import {
 } from '../api/source'
 import type { Book, BookGroup, Bookmark, BookSource, ReplaceRule, RssSource } from '../types'
 
-const BACKUP_VERSION = 1
+const BACKUP_VERSION = 2
 const LOCAL_STORAGE_KEYS = [
   'theme',
   'reader-stats',
@@ -31,6 +32,7 @@ const LOCAL_STORAGE_KEYS = [
 
 export interface WebdavBackupPayload {
   version: number
+  customCovers?: CustomCoverBackup
   createdAt: string
   app: string
   bookshelf: {
@@ -77,6 +79,7 @@ export async function createWebdavBackupPayload(): Promise<WebdavBackupPayload> 
 
   return {
     version: BACKUP_VERSION,
+    customCovers: await captureCustomCovers(books),
     createdAt: new Date().toISOString(),
     app: 'reader-next-frontend',
     bookshelf: {
@@ -103,7 +106,9 @@ export function parseWebdavBackup(raw: string) {
   if (!payload.version || !payload.bookshelf) {
     throw new Error('备份文件缺少必要字段')
   }
+  validateCustomCoverBackup(payload.customCovers)
   return {
+    customCovers: payload.customCovers || {},
     version: payload.version,
     createdAt: payload.createdAt || new Date().toISOString(),
     app: payload.app || 'reader-next-frontend',
@@ -120,6 +125,7 @@ export function parseWebdavBackup(raw: string) {
 }
 
 export async function restoreWebdavBackup(payload: WebdavBackupPayload) {
+  validateCustomCoverBackup(payload.customCovers)
   const currentGroups = await getBookGroups().catch(() => [])
   const currentBooks = await getBookshelf().catch(() => [])
   const currentBookmarks = await getBookmarks().catch(() => [])
@@ -155,6 +161,7 @@ export async function restoreWebdavBackup(payload: WebdavBackupPayload) {
   }
   if (payload.bookshelf.books.length) {
     await saveBooks(payload.bookshelf.books)
+    await restoreCustomCovers(payload.bookshelf.books, payload.customCovers)
   }
   if (payload.bookmarks.length) {
     await saveBookmarks(payload.bookmarks)

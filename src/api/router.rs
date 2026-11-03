@@ -183,6 +183,15 @@ pub fn build_router(state: AppState) -> Router {
             get(handlers::book_source_debug_sse),
         )
         .route("/reader3/cover", get(handlers::get_book_cover))
+        .route(
+            "/reader3/uploadBookCover",
+            post(handlers::upload_book_cover).layer(DefaultBodyLimit::max(5 * 1024 * 1024 + 65536)),
+        )
+        .route("/reader3/resetBookCover", post(handlers::reset_book_cover))
+        .route(
+            "/reader3/bookCover/:id",
+            get(handlers::get_custom_book_cover),
+        )
         .route("/reader3/getRssSources", get(handlers::get_rss_sources))
         .route("/reader3/saveRssSource", post(handlers::save_rss_source))
         .route("/reader3/saveRssSources", post(handlers::save_rss_sources))
@@ -327,11 +336,17 @@ mod tests {
     use std::sync::Arc;
 
     async fn create_test_state() -> (AppState, PathBuf) {
+        create_test_state_with_security(false).await
+    }
+
+    async fn create_test_state_with_security(secure: bool) -> (AppState, PathBuf) {
         let dir = std::env::temp_dir().join(format!("reader-router-{}", random_string(8)));
         std::fs::create_dir_all(&dir).unwrap();
         let database_url = format!("sqlite:{}?mode=rwc", dir.join("reader.db").display());
         let pool = db::init_pool(&database_url).await.unwrap();
         let cfg = AppConfig {
+            secure,
+            secure_key: "cover-test-key".into(),
             storage_dir: dir.to_string_lossy().to_string(),
             assets_dir: dir.join("assets").to_string_lossy().to_string(),
             web_root: dir.join("web").to_string_lossy().to_string(),
@@ -462,6 +477,161 @@ mod tests {
         }
         assert_eq!(report["checked"], 0, "{report}");
 
+        server.abort();
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+    #[tokio::test]
+    async fn custom_cover_http_upload_read_replace_reset_and_auth() {
+        use crate::model::book::Book;
+        let (state, dir) = create_test_state_with_security(true).await;
+        let original = Book {
+            book_url: "local://book".into(),
+            origin: "local".into(),
+            name: "book".into(),
+            dur_chapter_index: Some(7),
+            cover_url: Some("https://source.example/cover.jpg".into()),
+            ..Book::default()
+        };
+        state
+            .book_service
+            .save_book("alice", original.clone())
+            .await
+            .unwrap();
+        let service = state.book_service.clone();
+        // A closed loopback port makes the optional metadata refresh fail immediately.
+        // Switching sources must still carry over the custom cover.
+        let source_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let new_source = format!("http://{}", source_listener.local_addr().unwrap());
+        drop(source_listener);
+        state
+            .book_source_service
+            .save(
+                "alice",
+                crate::model::book_source::BookSource {
+                    book_source_url: new_source.clone(),
+                    book_source_name: "test source".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, build_router(state)).await.unwrap();
+        });
+        let client = Client::new();
+        let img = image::RgbImage::from_pixel(2, 3, image::Rgb([20, 100, 200]));
+        let mut png = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut png, image::ImageFormat::Png).unwrap();
+        let multipart = |bytes: &[u8]| {
+            let mut body = b"--cover-boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"../../escape.png\"\r\nContent-Type: image/png\r\n\r\n".to_vec();
+            body.extend_from_slice(bytes);
+            body.extend_from_slice(b"\r\n--cover-boundary--\r\n");
+            body
+        };
+        let upload = |body: Vec<u8>| {
+            client
+                .post(format!("{base}/reader3/uploadBookCover"))
+                .query(&[("bookUrl", "local://book")])
+                .header(
+                    "Content-Type",
+                    "multipart/form-data; boundary=cover-boundary",
+                )
+                .body(body)
+        };
+        let unauth = upload(multipart(png.get_ref())).send().await.unwrap();
+        assert_eq!(unauth.status(), StatusCode::BAD_REQUEST);
+        let denied: serde_json::Value = unauth.json().await.unwrap();
+        assert_eq!(denied["errorMsg"], "NEED_LOGIN");
+        let wrong_user = upload(multipart(png.get_ref()))
+            .header("X-Secure-Key", "cover-test-key")
+            .header("X-User-NS", "bob")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(wrong_user.status(), StatusCode::BAD_REQUEST);
+        let mut urls = Vec::new();
+        for _ in 0..2 {
+            let uploaded: serde_json::Value = upload(multipart(png.get_ref()))
+                .header("X-Secure-Key", "cover-test-key")
+                .header("X-User-NS", "alice")
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            assert_eq!(uploaded["isSuccess"], true, "{uploaded}");
+            assert_eq!(uploaded["data"]["durChapterIndex"], 7);
+            let url = uploaded["data"]["customCoverUrl"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            let image = client.get(format!("{base}{url}")).send().await.unwrap();
+            assert_eq!(image.status(), StatusCode::OK);
+            assert_eq!(image.headers()["content-type"], "image/jpeg");
+            assert_eq!(image.headers()["x-content-type-options"], "nosniff");
+            let bytes = image.bytes().await.unwrap();
+            assert!(image::load_from_memory(&bytes).is_ok());
+            urls.push(url);
+        }
+        assert_ne!(urls[0], urls[1], "new URLs invalidate image caches");
+        let invalid = upload(multipart(b"not an image"))
+            .header("X-Secure-Key", "cover-test-key")
+            .header("X-User-NS", "alice")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            service
+                .get_shelf_book("alice", &original.book_url)
+                .await
+                .unwrap()
+                .unwrap()
+                .custom_cover_url
+                .as_deref(),
+            Some(urls[1].as_str())
+        );
+        let invalid_path = client
+            .get(format!("{base}/reader3/bookCover/not-a-uuid"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(invalid_path.status(), StatusCode::NOT_FOUND);
+        let new_book_url = format!("{new_source}/book");
+        let switched: serde_json::Value = client.post(format!("{base}/reader3/setBookSource"))
+            .header("X-Secure-Key", "cover-test-key").header("X-User-NS", "alice")
+            .json(&serde_json::json!({"bookUrl": "local://book", "newUrl": new_book_url, "bookSourceUrl": new_source}))
+            .send().await.unwrap().json().await.unwrap();
+        assert_eq!(switched["isSuccess"], true, "{switched}");
+        assert_eq!(switched["data"]["customCoverUrl"], urls[1]);
+        assert_eq!(switched["data"]["durChapterIndex"], 7);
+        let reloaded = service
+            .get_shelf_book("alice", &new_book_url)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reloaded.custom_cover_url.as_deref(), Some(urls[1].as_str()));
+        let reset: serde_json::Value = client
+            .post(format!("{base}/reader3/resetBookCover"))
+            .header("X-Secure-Key", "cover-test-key")
+            .header("X-User-NS", "alice")
+            .json(&serde_json::json!({"bookUrl": new_book_url}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(reset["isSuccess"], true);
+        assert!(reset["data"]["customCoverUrl"].is_null());
+        assert_eq!(
+            reset["data"]["coverUrl"],
+            "https://source.example/cover.jpg"
+        );
+        assert_eq!(reset["data"]["durChapterIndex"], 7);
         server.abort();
         let _ = tokio::fs::remove_dir_all(dir).await;
     }

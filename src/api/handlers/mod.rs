@@ -1,4 +1,5 @@
 mod book;
+mod book_cover;
 mod book_group;
 mod book_source;
 mod bookmark;
@@ -10,6 +11,7 @@ mod user;
 mod webdav;
 
 pub use book::*;
+pub use book_cover::*;
 pub use book_group::*;
 pub use book_source::login_book_source;
 pub use book_source::*;

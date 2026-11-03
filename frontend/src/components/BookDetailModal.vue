@@ -14,7 +14,8 @@
 
           <!-- Book Header -->
           <div class="book-header">
-            <div class="book-cover-lg">
+            <BookCoverEditor v-if="shelfBook" :book="shelfBook" @saved="handleCoverSaved" />
+            <div v-else class="book-cover-lg">
               <img
                 v-if="coverSrc"
                 :src="coverSrc"
@@ -92,6 +93,7 @@
 
 <script setup lang="ts">
 import { ref, watch, computed } from 'vue'
+import BookCoverEditor from './BookCoverEditor.vue'
 import { useRouter } from 'vue-router'
 import { getCoverUrl, getChapterList } from '../api/bookshelf'
 import { useBookshelfStore } from '../stores/bookshelf'
@@ -110,6 +112,14 @@ const emit = defineEmits<{
 const router = useRouter()
 const readerStore = useReaderStore()
 const shelfStore = useBookshelfStore()
+
+const shelfBook = computed(() => shelfStore.books.find((entry) => entry.bookUrl === props.book?.bookUrl))
+function handleCoverSaved(updated: Book) {
+  shelfStore.applyBookCover(updated)
+  if (readerStore.book?.bookUrl === updated.bookUrl) {
+    readerStore.book.customCoverUrl = updated.customCoverUrl
+  }
+}
 
 const coverFailed = ref(false)
 const chapters = ref<BookChapter[]>([])

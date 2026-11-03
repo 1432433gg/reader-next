@@ -139,6 +139,12 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
     }
   }
 
+  function applyBookCover(book: Book) {
+    for (const entry of [...books.value, ...recentBooks.value]) {
+      if (entry.bookUrl === book.bookUrl) entry.customCoverUrl = book.customCoverUrl
+    }
+  }
+
   async function removeBook(book: Book) {
     await apiDeleteBook(book)
     await deleteBrowserBookCache(book.bookUrl).catch(() => undefined)
@@ -415,7 +421,7 @@ export const useBookshelfStore = defineStore('bookshelf', () => {
   return {
     chapterUpdateStatus, checkingUpdates, fetchChapterUpdateStatus, checkChapterUpdates, newChapterCountFor,
     books, recentBooks, loading, refreshing, sorting,
-    fetchBooks, refreshBooks, removeBook,
+    fetchBooks, refreshBooks, removeBook, applyBookCover,
     refreshRecentBooks, removeRecentBook, clearAllRecentBooks,
     groups, activeGroupId, displayGroups, filteredBooks,
     fetchGroups, saveGroup, removeGroup,

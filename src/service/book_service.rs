@@ -20,7 +20,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::fs;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tokio::time::{sleep, Duration, Instant};
 
 #[derive(Clone)]
@@ -29,6 +29,7 @@ pub struct BookService {
     parser: RuleEngine,
     cache: FileCache,
     storage_dir: PathBuf,
+    bookshelf_write_lock: Arc<Mutex<()>>,
     source_cookies: Arc<RwLock<HashMap<String, String>>>,
     rate_states: Arc<RwLock<HashMap<String, RateState>>>,
 }
@@ -62,6 +63,7 @@ impl BookService {
             parser,
             cache,
             storage_dir,
+            bookshelf_write_lock: Arc::new(Mutex::new(())),
             source_cookies: Arc::new(RwLock::new(HashMap::new())),
             rate_states: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -774,6 +776,7 @@ impl BookService {
     }
 
     pub async fn save_book(&self, user_ns: &str, mut book: Book) -> Result<Book, AppError> {
+        let _guard = self.bookshelf_write_lock.lock().await;
         sanitize_book_urls(&mut book);
         if book.origin.trim().is_empty() {
             return Err(AppError::BadRequest("missing origin".to_string()));
@@ -793,6 +796,8 @@ impl BookService {
 
         if let Some(i) = exist_idx {
             let exist = list[i].clone();
+            // Cover changes use set_custom_cover; stale readers/sort requests must not overwrite them.
+            book.custom_cover_url = exist.custom_cover_url.clone();
             if book.dur_chapter_index.is_none() {
                 book.dur_chapter_index = exist.dur_chapter_index;
             }
@@ -823,7 +828,27 @@ impl BookService {
         Ok(book)
     }
 
+    /// Update only the cover of an existing shelf book, preserving progress and metadata.
+    pub async fn set_custom_cover(
+        &self,
+        user_ns: &str,
+        book_url: &str,
+        cover_url: Option<String>,
+    ) -> Result<Book, AppError> {
+        let _guard = self.bookshelf_write_lock.lock().await;
+        let mut books = self.read_bookshelf(user_ns).await?;
+        let book = books
+            .iter_mut()
+            .find(|b| b.book_url == book_url)
+            .ok_or_else(|| AppError::BadRequest("请先将书籍加入书架".into()))?;
+        book.custom_cover_url = cover_url;
+        let updated = book.clone();
+        self.write_bookshelf(user_ns, &books).await?;
+        Ok(updated)
+    }
+
     pub async fn save_books(&self, user_ns: &str, books: Vec<Book>) -> Result<Vec<Book>, AppError> {
+        let _guard = self.bookshelf_write_lock.lock().await;
         let existing = self.read_bookshelf(user_ns).await?;
         let mut normalized: Vec<Book> = Vec::with_capacity(books.len());
         for mut book in books {
@@ -841,6 +866,7 @@ impl BookService {
                 .collect::<Vec<_>>();
             for existing_book in &matching_existing {
                 preserve_newer_reading_progress(existing_book, &mut book);
+                book.custom_cover_url = existing_book.custom_cover_url.clone();
             }
             if let Some(existing_index) = normalized
                 .iter()
@@ -858,6 +884,7 @@ impl BookService {
     }
 
     pub async fn delete_book(&self, user_ns: &str, book: &Book) -> Result<bool, AppError> {
+        let _guard = self.bookshelf_write_lock.lock().await;
         let mut list = self.read_bookshelf(user_ns).await?;
         let orig_len = list.len();
         let removed: Vec<Book> = list
@@ -877,6 +904,7 @@ impl BookService {
     }
 
     pub async fn delete_books(&self, user_ns: &str, books: Vec<Book>) -> Result<usize, AppError> {
+        let _guard = self.bookshelf_write_lock.lock().await;
         let mut list = self.read_bookshelf(user_ns).await?;
         let mut deleted = 0usize;
         let mut removed_books: Vec<Book> = Vec::new();
@@ -1097,9 +1125,14 @@ impl BookService {
                 .map_err(|e| AppError::Internal(e.into()))?;
         }
         let data = serde_json::to_string(list).map_err(|e| AppError::BadRequest(e.to_string()))?;
-        fs::write(&path, data)
+        let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+        fs::write(&temporary, data)
             .await
             .map_err(|e| AppError::Internal(e.into()))?;
+        if let Err(err) = fs::rename(&temporary, &path).await {
+            let _ = fs::remove_file(&temporary).await;
+            return Err(AppError::Internal(err.into()));
+        }
         Ok(())
     }
 
@@ -1919,6 +1952,83 @@ mod tests {
             storage_dir.to_str().unwrap(),
         );
         (service, storage_dir)
+    }
+
+    #[tokio::test]
+    async fn custom_cover_survives_stale_saves_and_reset_does_not_resurrect_it() {
+        let (service, dir) = test_book_service("custom-cover-preservation");
+        let original = Book {
+            name: "book".into(),
+            book_url: "local://book".into(),
+            origin: "local".into(),
+            cover_url: Some("https://example.com/source.jpg".into()),
+            dur_chapter_index: Some(12),
+            ..Book::default()
+        };
+        service.save_book("alice", original.clone()).await.unwrap();
+        let custom = Some("/reader3/bookCover/test".to_string());
+        let updated = service
+            .set_custom_cover("alice", &original.book_url, custom.clone())
+            .await
+            .unwrap();
+        assert_eq!(updated.dur_chapter_index, Some(12));
+        assert_eq!(updated.cover_url, original.cover_url);
+        assert!(service
+            .set_custom_cover("bob", &original.book_url, custom.clone())
+            .await
+            .is_err());
+        let saved = service.save_book("alice", original.clone()).await.unwrap();
+        assert_eq!(saved.custom_cover_url, custom);
+        let saved = service
+            .save_books("alice", vec![original.clone()])
+            .await
+            .unwrap();
+        assert_eq!(saved[0].custom_cover_url, custom);
+        service
+            .set_custom_cover("alice", &original.book_url, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            service
+                .save_book("alice", updated.clone())
+                .await
+                .unwrap()
+                .custom_cover_url,
+            None
+        );
+        assert_eq!(
+            service.save_books("alice", vec![updated]).await.unwrap()[0].custom_cover_url,
+            None
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn custom_cover_and_stale_progress_save_can_run_concurrently() {
+        let (service, dir) = test_book_service("custom-cover-concurrency");
+        let book = Book {
+            book_url: "local://book".into(),
+            origin: "local".into(),
+            ..Book::default()
+        };
+        service.save_book("alice", book.clone()).await.unwrap();
+        let custom = Some("/reader3/bookCover/test".to_string());
+        let (cover, progress) = tokio::join!(
+            service.set_custom_cover("alice", &book.book_url, custom.clone()),
+            service.save_book("alice", book.clone())
+        );
+        cover.unwrap();
+        progress.unwrap();
+        assert_eq!(
+            service
+                .get_shelf_book("alice", &book.book_url)
+                .await
+                .unwrap()
+                .unwrap()
+                .custom_cover_url,
+            custom
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]

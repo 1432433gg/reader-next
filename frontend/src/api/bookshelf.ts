@@ -21,6 +21,19 @@ export function saveBooks(books: Partial<Book>[]) {
   return http.post<Book[]>('/saveBooks', books).then((r) => r.data)
 }
 
+export function uploadBookCover(bookUrl: string, file: File) {
+  const data = new FormData()
+  data.append('file', file)
+  return http.post<Book>('/uploadBookCover', data, {
+    params: { bookUrl },
+    headers: { 'Content-Type': 'multipart/form-data' },
+  }).then((r) => r.data)
+}
+
+export function resetBookCover(bookUrl: string) {
+  return http.post<Book>('/resetBookCover', { bookUrl }).then((r) => r.data)
+}
+
 export function uploadTxtBook(file: File) {
   const formData = new FormData()
   formData.append('file', file)
@@ -124,6 +137,7 @@ export function setBookSource(params: {
 // ─── Cover helper ───
 export function getCoverUrl(coverUrl?: string) {
   if (!coverUrl) return ''
+  if (/^\/reader3\/bookCover\/[0-9a-f-]{36}$/.test(coverUrl)) return coverUrl
   if (coverUrl.startsWith('http') || coverUrl.startsWith('/')) {
     return `/reader3/cover?path=${encodeURIComponent(coverUrl)}`
   }
