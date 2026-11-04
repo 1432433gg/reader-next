@@ -14,7 +14,6 @@
     <template v-else>
       <button type="button" :disabled="busy" class="cover-button" @click="input?.click()">{{ preparing ? '处理图片…' : '更换封面' }}</button>
       <button v-if="book.customCoverUrl" type="button" :disabled="busy" class="cover-button" @click="reset">{{ saving ? '恢复中…' : '恢复默认' }}</button>
-      <span class="cover-hint">JPG / PNG / WebP<br />最大 5MB</span>
     </template>
     <p v-if="error" class="cover-error" role="alert">{{ error }}</p>
     <p v-if="message" class="cover-hint" role="status">{{ message }}</p>

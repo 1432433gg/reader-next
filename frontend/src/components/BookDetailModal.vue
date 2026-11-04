@@ -147,6 +147,7 @@ watch(() => props.modelValue, async (visible) => {
       const b = props.book as Book
       chapters.value = await getChapterList({
         bookUrl: b.bookUrl,
+        tocUrl: b.tocUrl || undefined,
         bookSourceUrl: b.origin,
       })
     } catch {
@@ -162,23 +163,22 @@ function close() {
 }
 
 async function startReading() {
-  if (!props.book) return
-  const b = props.book as Book
-  await shelfStore.moveBookToFront(b.bookUrl).catch(() => undefined)
-  if (!await readerStore.loadBook(b)) return
-  await readerStore.loadChapter(readerStore.currentIndex)
-  close()
-  router.push('/reader')
+  await openReader()
 }
 
 async function readChapter(index: number) {
+  await openReader(index)
+}
+
+async function openReader(index?: number) {
   if (!props.book) return
   const b = props.book as Book
   await shelfStore.moveBookToFront(b.bookUrl).catch(() => undefined)
-  if (!await readerStore.loadBook(b)) return
-  await readerStore.loadChapter(index)
+  const opening = readerStore.loadBook(b).catch(() => false)
   close()
-  router.push('/reader')
+  await router.push('/reader')
+  if (!await opening) return
+  await readerStore.loadChapter(index ?? readerStore.currentIndex).catch(() => undefined)
 }
 </script>
 

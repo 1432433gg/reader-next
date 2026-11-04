@@ -207,6 +207,8 @@ export const useReaderStore = defineStore('reader', () => {
   const content = ref('')
   const loading = ref(false)
   const chaptersLoading = ref(false)
+  const loadError = ref('')
+  let failedChapterIndex: number | null = null
   const bookmarks = ref<Bookmark[]>([])
   const replaceRules = ref<ReplaceRule[]>([])
   const preloadedContent = ref<Map<number, string>>(new Map()) // index -> content
@@ -239,6 +241,8 @@ export const useReaderStore = defineStore('reader', () => {
     lastServerProgressKey.value = ''
     loading.value = !!nextBook
     chaptersLoading.value = !!nextBook
+    loadError.value = ''
+    failedChapterIndex = null
     return bookSessionId.value
   }
 
@@ -482,6 +486,7 @@ export const useReaderStore = defineStore('reader', () => {
       restoredBook = latestBook
       restoredChapters = await getChapterList({
         bookUrl: latestBook.bookUrl,
+        tocUrl: latestBook.tocUrl || undefined,
         bookSourceUrl: latestBook.origin,
       }).catch(() => session.chapters)
       if (sessionId !== bookSessionId.value) return false
@@ -939,40 +944,40 @@ export const useReaderStore = defineStore('reader', () => {
   async function loadBook(b: Book) {
     // 在第一次 await 前切换身份并清空正文，避免新阅读页挂载时使用旧书。
     const sessionId = beginBookSession(b)
-    const latestBook = { ...await resolveLatestShelfBook(b) }
-    if (sessionId !== bookSessionId.value) return false
-    // 离线读过的进度存不到服务端，只在本机的阅读会话里：比服务端的新就用它，
-    // 打开章节后会标成待同步，下次自动保存时推到服务端。否则从书架打开会退回服务端的旧进度，
-    // 再把旧进度存回去，离线读的那段就丢了。
-    const session = getPersistedReaderSession()
-    if (
-      session?.book?.bookUrl === latestBook.bookUrl
-      && normalizeProgressTimestamp(session.updatedAt) > normalizeProgressTimestamp(latestBook.durChapterTime)
-    ) {
-      latestBook.durChapterIndex = session.currentIndex
-      latestBook.durChapterPos = encodeServerProgress(session.chapterScrollProgress || 0)
-      latestBook.durChapterTime = session.updatedAt
-    }
-    book.value = latestBook
-    appStore.markBookOpened(latestBook.bookUrl)
-    currentIndex.value = latestBook.durChapterIndex || 0
-    loadReadChapterHistory(latestBook)
     try {
+      const latestBook = { ...await resolveLatestShelfBook(b) }
+      if (sessionId !== bookSessionId.value) return false
+      // 离线读过的进度存不到服务端，只在本机的阅读会话里：比服务端的新就用它，
+      // 打开章节后会标成待同步，下次自动保存时推到服务端。否则从书架打开会退回服务端的旧进度，
+      // 再把旧进度存回去，离线读的那段就丢了。
+      const session = getPersistedReaderSession()
+      if (
+        session?.book?.bookUrl === latestBook.bookUrl
+        && normalizeProgressTimestamp(session.updatedAt) > normalizeProgressTimestamp(latestBook.durChapterTime)
+      ) {
+        latestBook.durChapterIndex = session.currentIndex
+        latestBook.durChapterPos = encodeServerProgress(session.chapterScrollProgress || 0)
+        latestBook.durChapterTime = session.updatedAt
+      }
+      book.value = latestBook
+      appStore.markBookOpened(latestBook.bookUrl)
+      currentIndex.value = latestBook.durChapterIndex || 0
+      loadReadChapterHistory(latestBook)
       const nextChapters = await getChapterList({
         bookUrl: latestBook.bookUrl,
+        tocUrl: latestBook.tocUrl || undefined,
         bookSourceUrl: latestBook.origin,
       })
       if (sessionId !== bookSessionId.value) return false
+      if (!nextChapters.length) throw new Error('书源未返回目录，请重试或更换书源')
       chapters.value = nextChapters
-      if (chapters.value.length) {
-        currentIndex.value = Math.max(0, Math.min(currentIndex.value, chapters.value.length - 1))
-      }
+      currentIndex.value = Math.max(0, Math.min(currentIndex.value, chapters.value.length - 1))
       saveReaderSession()
-      if (!chapters.value.length) loading.value = false
       return true
     } catch (error) {
       if (sessionId !== bookSessionId.value) return false
       loading.value = false
+      loadError.value = `目录加载失败：${error instanceof Error ? error.message : '请稍后重试'}`
       throw error
     } finally {
       if (sessionId === bookSessionId.value) chaptersLoading.value = false
@@ -980,6 +985,8 @@ export const useReaderStore = defineStore('reader', () => {
   }
 
   function setActiveChapterState(index: number, chapterContent: string, progress = 0) {
+    loadError.value = ''
+    failedChapterIndex = null
     currentIndex.value = index
     content.value = chapterContent
     chapterScrollProgress.value = Math.max(0, Math.min(1, progress))
@@ -1064,12 +1071,12 @@ export const useReaderStore = defineStore('reader', () => {
       : null
     if (!isCurrent()) return null
 
-    if (!forceRefresh && browserCached) {
+    if (!forceRefresh && browserCached?.trim()) {
       return browserCached
     }
 
     if (!appStore.isOnline && !isLocalTxt) {
-      if (browserCached) {
+      if (browserCached?.trim()) {
         return browserCached
       }
       throw new Error('当前处于离线状态，且该章节未缓存到浏览器')
@@ -1085,13 +1092,15 @@ export const useReaderStore = defineStore('reader', () => {
       })
     } catch (error) {
       if (!isCurrent()) return null
-      if (browserCached) {
+      if (browserCached?.trim()) {
         appStore.showToast('网络请求失败，已切换到本地缓存章节', 'warning')
         return browserCached
       }
       throw error
     }
     if (!isCurrent()) return null
+
+    if (!isLocalTxt && !chapterContent.trim()) throw new Error('书源未返回正文，请重试或更换书源')
 
     if (useBrowserCache) {
       await setBrowserCachedChapter({
@@ -1112,6 +1121,8 @@ export const useReaderStore = defineStore('reader', () => {
     const isCurrent = () => sessionId === bookSessionId.value && requestId === chapterRequestId
 
     loading.value = true
+    loadError.value = ''
+    failedChapterIndex = index
     try {
       const chapterContent = await fetchChapterContent(index, forceRefresh)
       if (!isCurrent() || chapterContent == null) return
@@ -1137,9 +1148,24 @@ export const useReaderStore = defineStore('reader', () => {
         }, forceRefresh ? 1500 : 1000)
       }
     } catch (error) {
-      if (isCurrent()) throw error
+      if (isCurrent()) {
+        loadError.value = `正文加载失败：${error instanceof Error ? error.message : '请稍后重试'}`
+        throw error
+      }
     } finally {
       if (isCurrent()) loading.value = false
+    }
+  }
+
+  async function retryLoad() {
+    if (!book.value || loading.value || chaptersLoading.value) return
+    try {
+      if (!chapters.value.length) {
+        if (!await loadBook({ ...book.value })) return
+      }
+      await loadChapter(failedChapterIndex ?? currentIndex.value)
+    } catch {
+      // The active load exposes its error in the reader; allow another manual retry.
     }
   }
 
@@ -1381,7 +1407,7 @@ export const useReaderStore = defineStore('reader', () => {
   }
 
   return {
-    book, bookSessionId, chapters, currentIndex, content, loading, chaptersLoading,
+    book, bookSessionId, chapters, currentIndex, content, loading, chaptersLoading, loadError, retryLoad,
     currentChapter, hasNext, hasPrev, readingProgress,
       loadBook, loadChapter, fetchChapterContent, setActiveChapterState, refreshContent, nextChapter, prevChapter, clear,
       chapterScrollProgress, setChapterScrollProgress,

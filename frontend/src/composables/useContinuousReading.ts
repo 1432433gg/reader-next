@@ -96,7 +96,7 @@ export function useContinuousReading(
   }
 
   async function initializeContinuousChapters(targetIndex = store.currentIndex, smooth = false) {
-    if (disposed || !isContinuousMode.value || store.loading || store.chaptersLoading || !store.chapters[targetIndex]) return
+    if (disposed || !isContinuousMode.value || store.loading || store.loadError || store.chaptersLoading || !store.chapters[targetIndex]) return
     clearContinuousChapters()
     const requestGeneration = generation
 
@@ -127,7 +127,7 @@ export function useContinuousReading(
   }
 
   async function syncContinuousToStoreState() {
-    if (!isContinuousMode.value || suppressContinuousSync.value || store.loading || !store.chapters[store.currentIndex]) return
+    if (!isContinuousMode.value || suppressContinuousSync.value || store.loading || store.loadError || !store.chapters[store.currentIndex]) return
 
     pruneReadChapters(store.currentIndex)
     const current = getContinuousChapter(store.currentIndex)

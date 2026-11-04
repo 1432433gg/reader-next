@@ -120,10 +120,10 @@ async function handleBookClick(book: Book | SearchBook) {
 
   try {
     await shelfStore.moveBookToFront(currentBook.bookUrl).catch(() => undefined)
-    const loadBookTask = readerStore.loadBook(currentBook)
+    const loadBookTask = readerStore.loadBook(currentBook).catch(() => false)
     await router.push('/reader')
     if (!await loadBookTask) return
-    await readerStore.loadChapter(readerStore.currentIndex)
+    await readerStore.loadChapter(readerStore.currentIndex).catch(() => undefined)
   } finally {
     openingBookUrl.value = ''
   }

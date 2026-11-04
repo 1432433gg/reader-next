@@ -1054,42 +1054,19 @@ pub async fn get_chapter_list(
         req.book_url.as_deref().or(req.toc_url.as_deref()),
     )
     .await?;
-    let toc_url = if let Some(u) = req.toc_url {
+    let toc_url = if let Some(u) = req.toc_url.filter(|url| !url.trim().is_empty()) {
         repair_encoded_url(&u)
     } else if let Some(book_url) = req.book_url {
         let book_url = repair_encoded_url(&book_url);
-        let book = state
+        state
             .book_service
-            .get_book_info(&user_ns, &source, &book_url)
-            .await?;
-        repair_encoded_url(book.toc_url.as_deref().unwrap_or(&book_url))
+            .resolve_toc_url(&user_ns, &source, &book_url)
+            .await?
     } else {
         return Err(AppError::BadRequest(
             "tocUrl or bookUrl required".to_string(),
         ));
     };
-
-    // Check if we have cached chapters
-    if do_refresh {
-        let _ = state
-            .book_service
-            .delete_chapter_list_cache(&user_ns, &toc_url)
-            .await;
-    }
-
-    if !do_refresh {
-        if let Ok(Some(cached)) = state
-            .book_service
-            .load_chapter_list_cache(&user_ns, &toc_url)
-            .await
-        {
-            if !cached.is_empty() {
-                return Ok(Json(ApiResponse::ok(
-                    serde_json::to_value(cached).unwrap_or_default(),
-                )));
-            }
-        }
-    }
 
     let chapters = state
         .book_service
@@ -1275,23 +1252,14 @@ pub async fn get_book_content(
                 Some(url),
             )
             .await?;
-            let book_info = state
+            let toc_url = state
                 .book_service
-                .get_book_info(&user_ns, &source, url)
+                .resolve_toc_url(&user_ns, &source, url)
                 .await?;
-            let toc_url = book_info.toc_url.as_deref().unwrap_or(url);
-
-            // If refresh is requested, delete chapter list cache first
-            if do_refresh {
-                let _ = state
-                    .book_service
-                    .delete_chapter_list_cache(&user_ns, toc_url)
-                    .await;
-            }
 
             let mut chapters = state
                 .book_service
-                .get_chapter_list_with_cache(&user_ns, &source, toc_url, do_refresh)
+                .get_chapter_list_with_cache(&user_ns, &source, &toc_url, do_refresh)
                 .await?;
             let idx = req.index.unwrap() as usize;
 
@@ -1306,7 +1274,7 @@ pub async fn get_book_content(
                 );
                 chapters = state
                     .book_service
-                    .get_chapter_list_with_cache(&user_ns, &source, toc_url, true)
+                    .get_chapter_list_with_cache(&user_ns, &source, &toc_url, true)
                     .await?;
 
                 if idx >= chapters.len() {

@@ -373,6 +373,87 @@ describe('reader view book switching', () => {
 
 // A book's detail page and its chapter URLs need not share a path or host.
 describe('explicit cache ownership', () => {
+  it('uses the known catalog when book details are unavailable and content is uncached', async () => {
+    const withCatalog = { ...first, tocUrl: 'https://source.example/catalog/1' }
+    vi.mocked(getShelfBook).mockResolvedValue(withCatalog)
+    vi.mocked(getChapterList).mockImplementation(async ({ tocUrl }) => {
+      if (tocUrl !== withCatalog.tocUrl) throw new Error('详情页不可用')
+      return chaptersFor(first.bookUrl)
+    })
+    const store = useReaderStore()
+    await store.loadBook(withCatalog)
+    await store.loadChapter(0)
+    expect(store.content).toBe('book-a/0 正文')
+    expect(getBookContent).toHaveBeenCalled()
+  })
+
+  it('rejects an empty catalog without overwriting the saved session', async () => {
+    const store = useReaderStore()
+    await store.loadBook(first)
+    await store.loadChapter(0)
+    const saved = localStorage.getItem('reader-last-session')
+    vi.mocked(getChapterList).mockResolvedValueOnce([])
+    await expect(store.loadBook(second)).rejects.toThrow('书源未返回目录')
+    expect(store.loadError).toContain('目录加载失败')
+    expect(store.loading).toBe(false)
+    expect(localStorage.getItem('reader-last-session')).toBe(saved)
+  })
+
+  it('rejects empty source content and retries the failed chapter', async () => {
+    const store = useReaderStore()
+    await store.loadBook(first)
+    await store.loadChapter(0)
+    vi.mocked(setBrowserCachedChapter).mockClear()
+    vi.mocked(getBookContent).mockResolvedValueOnce('  \n')
+    await expect(store.loadChapter(1)).rejects.toThrow('书源未返回正文')
+    expect(store.currentIndex).toBe(0)
+    expect(setBrowserCachedChapter).not.toHaveBeenCalled()
+    await store.retryLoad()
+    expect(store.currentIndex).toBe(1)
+    expect(store.content).toBe('book-a/1 正文')
+    expect(store.loadError).toBe('')
+  })
+
+  it('allows an intentionally empty imported chapter', async () => {
+    const localBook = { ...first, bookUrl: 'local-txt:first', origin: 'local-txt' }
+    vi.mocked(getShelfBook).mockResolvedValueOnce(localBook)
+    vi.mocked(getBookContent).mockResolvedValueOnce('')
+    const store = useReaderStore()
+    await store.loadBook(localBook)
+    await store.loadChapter(0)
+    expect(store.currentChapter?.title).toBe('local-txt:first 第 1 章')
+    expect(store.loadError).toBe('')
+    expect(store.loading).toBe(false)
+  })
+
+  it.each(['上下滑动', '左右翻页', '上下滚动', '上下滚动2'] as const)(
+    'shows and recovers from catalog failures in %s mode', async (readMethod) => {
+      const store = useReaderStore()
+      store.config.readMethod = readMethod
+      vi.mocked(getChapterList).mockRejectedValueOnce(new Error('书源连接超时'))
+      await store.loadBook(first).catch(() => undefined)
+      const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/reader', component: ReaderView }] })
+      await router.push('/reader')
+      const wrapper = shallowMount(ReaderView, {
+        global: { plugins: [router], stubs: { ReaderTtsPanel: true, ReaderSearchPanel: true, BookDetailModal: true } },
+      })
+      const keepalive = vi.spyOn(store, 'flushProgressToServerKeepalive').mockImplementation(() => {})
+      try {
+        await flushPromises()
+        expect(wrapper.get('[role="alert"]').text()).toContain('书源连接超时')
+        expect(wrapper.text()).not.toContain('没有更多了')
+        expect(wrapper.text()).not.toContain('加载中...')
+        await wrapper.get('.reader-retry').trigger('click')
+        await flushPromises()
+        expect(wrapper.find('[role="alert"]').exists()).toBe(false)
+        expect(wrapper.text()).toContain('book-a/0 正文')
+      } finally {
+        wrapper.unmount()
+        keepalive.mockRestore()
+      }
+    },
+  )
+
   it('sends book identity for reading, preloading and forced refresh', async () => {
     const store = useReaderStore()
     const chapter = { index: 0, title: '第一章', url: 'https://cdn.example/text/42' }

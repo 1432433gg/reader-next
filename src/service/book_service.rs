@@ -397,6 +397,29 @@ impl BookService {
         Ok(self.parser.book_info(source, &res.body, &res.url, book_url))
     }
 
+    pub async fn resolve_toc_url(
+        &self,
+        user_ns: &str,
+        source: &BookSource,
+        book_url: &str,
+    ) -> Result<String, AppError> {
+        // A transient detail-page failure must not block a known catalog or its cache.
+        if let Some(book) = self.get_shelf_book(user_ns, book_url).await? {
+            if normalize_source_url(&book.origin) == normalize_source_url(&source.book_source_url) {
+                if let Some(toc_url) = book.toc_url.filter(|url| !url.trim().is_empty()) {
+                    return Ok(repair_encoded_url(&toc_url));
+                }
+            }
+        }
+        let book = self.get_book_info(user_ns, source, book_url).await?;
+        Ok(repair_encoded_url(
+            book.toc_url
+                .as_deref()
+                .filter(|url| !url.trim().is_empty())
+                .unwrap_or(book_url),
+        ))
+    }
+
     pub async fn get_chapter_list(
         &self,
         user_ns: &str,
@@ -425,7 +448,12 @@ impl BookService {
         let (chapters, _) = self
             .get_chapter_list_with_pagination(user_ns, source, toc_url)
             .await?;
-        // Save to cache
+        if chapters.is_empty() {
+            return Err(AppError::BadRequest(
+                "书源未返回目录，请重试或更换书源".to_string(),
+            ));
+        }
+        // Replace the previous catalog only after a successful, nonempty response.
         let _ = self
             .save_chapter_list_cache(user_ns, toc_url, &chapters)
             .await;
@@ -558,8 +586,11 @@ impl BookService {
         self.restore_legacy_chapter_cache(user_ns, book_url, chapter_url)
             .await;
         if let Ok(Some(cached)) = self.cache.get(user_ns, &book_key, chapter_url).await {
-            tracing::debug!("get_content returning cached content, len={}", cached.len());
-            return Ok(cached);
+            if !cached.trim().is_empty() {
+                tracing::debug!("get_content returning cached content, len={}", cached.len());
+                return Ok(cached);
+            }
+            let _ = self.cache.remove(user_ns, &book_key, chapter_url).await;
         }
         tracing::debug!("get_content cache miss, fetching from network");
 
@@ -606,12 +637,15 @@ impl BookService {
         }
 
         tracing::debug!("get_content final content len={}", all_content.len());
-        if !all_content.is_empty() {
-            let _ = self
-                .cache
-                .put(user_ns, &book_key, chapter_url, &all_content)
-                .await;
+        if all_content.trim().is_empty() {
+            return Err(AppError::BadRequest(
+                "书源未返回正文，请重试或更换书源".to_string(),
+            ));
         }
+        let _ = self
+            .cache
+            .put(user_ns, &book_key, chapter_url, &all_content)
+            .await;
         Ok(all_content)
     }
 

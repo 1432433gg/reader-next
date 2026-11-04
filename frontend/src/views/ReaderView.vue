@@ -120,12 +120,18 @@
         <div class="loading-spinner"></div>
       </div>
 
+      <div v-else-if="store.loadError" class="reader-load-error" role="alert">
+        <p>{{ store.loadError }}</p>
+        <button class="reader-retry" @click.stop="store.retryLoad()">重新加载</button>
+        <button @click.stop="router.push('/')">返回书架</button>
+      </div>
+
       <div v-else-if="offlineBannerText" class="offline-banner">
         {{ offlineBannerText }}
       </div>
 
       <article
-        v-if="!store.loading && !isContinuousMode"
+        v-if="!store.loading && !store.loadError && store.currentChapter && !isContinuousMode"
         class="chapter-content"
         :class="{ 'horizontal-page-article': isHorizontalPageMode }"
         :style="{
@@ -162,7 +168,7 @@
         </div>
 
         <div v-else>
-          <div class="chapter-title">{{ store.currentChapter?.title || '加载中...' }}</div>
+          <div class="chapter-title">{{ store.currentChapter?.title }}</div>
 
           <div
             ref="chapterTextRef"
@@ -182,7 +188,7 @@
       </article>
 
       <Transition name="fade">
-        <div v-if="!store.loading && isHorizontalPageMode && isHorizontalAtEnd" class="horizontal-next-floating">
+        <div v-if="!store.loading && !store.loadError && store.currentChapter && isHorizontalPageMode && isHorizontalAtEnd" class="horizontal-next-floating">
           <button class="next-btn" :disabled="!store.hasNext" @click="nextChapter">
             {{ store.hasNext ? '下一章' : '没有更多了' }}
           </button>
@@ -190,7 +196,7 @@
       </Transition>
 
       <div
-        v-if="!store.loading && isContinuousMode"
+        v-if="!store.loading && !store.loadError && isContinuousMode"
         class="continuous-reading"
         :style="{
           maxWidth: config.pageWidth + 'px',
@@ -1797,6 +1803,9 @@ watch(
 </script>
 
 <style scoped>
+.reader-load-error { max-width: 600px; margin: 48px auto; padding: 24px; text-align: center; overflow-wrap: anywhere; }
+.reader-load-error p { margin-bottom: 16px; }
+.reader-load-error button { min-height: 44px; margin: 4px; padding: 8px 20px; border: 1px solid currentColor; border-radius: 24px; color: inherit; }
 .reader-view {
   height: 100vh;
   height: 100dvh;

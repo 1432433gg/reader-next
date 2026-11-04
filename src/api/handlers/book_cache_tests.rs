@@ -3,7 +3,12 @@ use crate::{
     api::{handlers, AppState},
     app::config::AppConfig,
     crawler::http_client::HttpClient,
-    model::{book::Book, book_chapter::BookChapter, book_source::BookSource, rule::ContentRule},
+    model::{
+        book::Book,
+        book_chapter::BookChapter,
+        book_source::BookSource,
+        rule::{ContentRule, TocRule},
+    },
     parser::rule_engine::RuleEngine,
     service::{
         book_group_service::BookGroupService, book_service::BookService,
@@ -102,19 +107,26 @@ impl Fixture {
         };
         let hits = Arc::new(AtomicUsize::new(0));
         let counter = hits.clone();
-        let (source, source_task) = serve(Router::new().route(
-            "/text/:speed/:id",
-            get(move |Path((speed, id)): Path<(String, String)>| {
-                let counter = counter.clone();
-                async move {
-                    counter.fetch_add(1, Ordering::SeqCst);
-                    if speed == "slow" {
-                        tokio::time::sleep(Duration::from_millis(150)).await;
-                    }
-                    Html(format!("<div id='content'>chapter {id}</div>"))
-                }
-            }),
-        ))
+        let (source, source_task) = serve(
+            Router::new()
+                .route(
+                    "/text/:speed/:id",
+                    get(move |Path((speed, id)): Path<(String, String)>| {
+                        let counter = counter.clone();
+                        async move {
+                            counter.fetch_add(1, Ordering::SeqCst);
+                            if speed == "slow" {
+                                tokio::time::sleep(Duration::from_millis(150)).await;
+                            }
+                            Html(format!("<div id='content'>chapter {id}</div>"))
+                        }
+                    }),
+                )
+                .route(
+                    "/chapters",
+                    get(|| async { Html("<a href='/text/fast/uncached'>First</a>") }),
+                ),
+        )
         .await;
         state
             .book_source_service
@@ -123,6 +135,12 @@ impl Fixture {
                 BookSource {
                     book_source_url: source.clone(),
                     book_source_name: "loopback fixture".into(),
+                    rule_toc: Some(TocRule {
+                        chapter_list: Some("a".into()),
+                        chapter_name: Some("text".into()),
+                        chapter_url: Some("href".into()),
+                        ..Default::default()
+                    }),
                     rule_content: Some(ContentRule {
                         content: Some("#content@text".into()),
                         ..Default::default()
@@ -139,6 +157,7 @@ impl Fixture {
                     get(handlers::get_book_content).post(handlers::get_book_content),
                 )
                 .route("/shelf", get(handlers::get_shelf_book_with_cache_info))
+                .route("/catalog", post(handlers::get_chapter_list))
                 .route("/clear", post(handlers::delete_book_cache))
                 .with_state(state.clone()),
         )
@@ -232,6 +251,208 @@ impl Fixture {
         self.pool.close().await;
         let _ = tokio::fs::remove_dir_all(&self.root).await;
     }
+}
+
+#[tokio::test]
+async fn http_catalog_cache_survives_unavailable_details_without_cached_content() {
+    let f = Fixture::new().await;
+    let book = format!("{}/missing-details", f.source);
+    let toc = format!("{}/catalog-for-book", f.source);
+    let chapter = format!("{}/text/fast/uncached", f.source);
+    f.state
+        .book_service
+        .save_book(
+            "default",
+            Book {
+                book_url: book.clone(),
+                toc_url: Some(toc.clone()),
+                origin: f.source.clone(),
+                name: "fixture".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    f.catalog(&toc, &[chapter.clone()]).await;
+    assert_eq!(f.count(&book).await, 0);
+    let response: Value = f
+        .client
+        .post(format!("{}/catalog", f.api))
+        .json(&json!({"bookUrl": book, "bookSourceUrl": f.source}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(response["isSuccess"], true, "{response}");
+    assert_eq!(response["data"][0]["url"], chapter);
+    assert_eq!(
+        f.content(&book, &chapter, "json", false).await,
+        "chapter uncached"
+    );
+    assert_eq!(f.count(&book).await, 1);
+    f.cleanup().await;
+}
+
+#[tokio::test]
+async fn http_known_catalog_loads_without_details_or_any_server_cache() {
+    let f = Fixture::new().await;
+    let book = format!("{}/missing-details", f.source);
+    let toc = format!("{}/chapters", f.source);
+    f.state
+        .book_service
+        .save_book(
+            "default",
+            Book {
+                book_url: book.clone(),
+                toc_url: Some(toc),
+                origin: f.source.clone(),
+                name: "fixture".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let response: Value = f
+        .client
+        .post(format!("{}/catalog", f.api))
+        .json(&json!({"bookUrl": book, "bookSourceUrl": f.source}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(response["isSuccess"], true, "{response}");
+    let chapter = response["data"][0]["url"].as_str().unwrap();
+    assert_eq!(chapter, format!("{}/text/fast/uncached", f.source));
+    assert_eq!(
+        f.content(&book, chapter, "json", false).await,
+        "chapter uncached"
+    );
+    f.cleanup().await;
+}
+
+#[tokio::test]
+async fn http_catalog_does_not_reuse_shelf_toc_from_a_different_source() {
+    let f = Fixture::new().await;
+    let book = format!("{}/missing-details", f.source);
+    let toc = format!("{}/chapters", f.source);
+    f.state
+        .book_service
+        .save_book(
+            "default",
+            Book {
+                book_url: book.clone(),
+                toc_url: Some(toc),
+                origin: "https://different-source.invalid".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let response: Value = f
+        .client
+        .post(format!("{}/catalog", f.api))
+        .json(&json!({"bookUrl": book, "bookSourceUrl": f.source}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(response["isSuccess"], false, "{response}");
+    f.cleanup().await;
+}
+
+#[tokio::test]
+async fn http_empty_catalog_refresh_reports_failure_and_preserves_previous_catalog() {
+    let f = Fixture::new().await;
+    let book = format!("{}/details", f.source);
+    let toc = format!("{}/text/fast/empty-catalog", f.source);
+    let chapter = format!("{}/text/fast/one", f.source);
+    f.catalog(&toc, &[chapter.clone()]).await;
+    let response: Value = f
+        .client
+        .post(format!("{}/catalog", f.api))
+        .json(&json!({"bookUrl": book, "tocUrl": toc, "bookSourceUrl": f.source, "refresh": 1}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(response["isSuccess"], false, "{response}");
+    assert!(response["errorMsg"].as_str().unwrap().contains("目录"));
+    let previous = f
+        .state
+        .book_service
+        .load_chapter_list_cache("default", &toc)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(previous[0].url, chapter);
+    f.cleanup().await;
+}
+
+#[tokio::test]
+async fn http_empty_source_content_is_not_success_or_cached_and_can_be_retried() {
+    let f = Fixture::new().await;
+    let book = format!("{}/details", f.source);
+    let chapter = format!("{}/text/fast/retry", f.source);
+    let mut source = f
+        .state
+        .book_source_service
+        .get("default", &f.source)
+        .await
+        .unwrap()
+        .unwrap();
+    let good_rule = source.rule_content.clone();
+    source.rule_content = Some(ContentRule {
+        content: Some("#missing@text".into()),
+        ..Default::default()
+    });
+    f.state
+        .book_source_service
+        .save("default", source.clone())
+        .await
+        .unwrap();
+    let response: Value = f
+        .client
+        .post(format!("{}/content", f.api))
+        .json(&json!({"bookUrl": book, "chapterUrl": chapter, "bookSourceUrl": f.source}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(response["isSuccess"], false, "{response}");
+    assert!(response["errorMsg"].as_str().unwrap().contains("正文"));
+    assert!(
+        !f.state
+            .book_service
+            .is_chapter_cached("default", &book, &chapter)
+            .await
+    );
+    source.rule_content = good_rule;
+    f.state
+        .book_source_service
+        .save("default", source)
+        .await
+        .unwrap();
+    assert_eq!(
+        f.content(&book, &chapter, "json", false).await,
+        "chapter retry"
+    );
+    assert!(
+        f.state
+            .book_service
+            .is_chapter_cached("default", &book, &chapter)
+            .await
+    );
+    f.cleanup().await;
 }
 
 #[tokio::test]

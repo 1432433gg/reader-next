@@ -301,9 +301,10 @@ onUnmounted(() => {
 async function handleBookClick(book: Book | SearchBook) {
   const b = book as Book
   if (b.origin && b.bookUrl) {
-    if (!await readerStore.loadBook(b)) return
-    await readerStore.loadChapter(readerStore.currentIndex)
-    router.push('/reader')
+    const opening = readerStore.loadBook(b).catch(() => false)
+    await router.push('/reader')
+    if (!await opening) return
+    await readerStore.loadChapter(readerStore.currentIndex).catch(() => undefined)
   }
 }
 

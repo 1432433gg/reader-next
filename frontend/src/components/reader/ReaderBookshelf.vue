@@ -45,11 +45,11 @@ if (!store.books.length) {
 }
 
 async function openBook(book: Book) {
-  if (book.bookUrl !== readerStore.book?.bookUrl) {
-    if (!await readerStore.loadBook(book)) return
-    await readerStore.loadChapter(readerStore.currentIndex)
-  }
   readerStore.closePanel()
+  if (book.bookUrl !== readerStore.book?.bookUrl) {
+    if (!await readerStore.loadBook(book).catch(() => false)) return
+    await readerStore.loadChapter(readerStore.currentIndex).catch(() => undefined)
+  }
 }
 </script>
 
