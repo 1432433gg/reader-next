@@ -75,6 +75,17 @@ jobs:
       - name: Verify bundled Reader, WebView and isolation
         run: bash docker/tests/run-bundled-smoke.sh reader-next:bundle-verify
 
+      - name: Verify dynamic source through first chapter
+        run: |
+          image_container=$(docker create reader-next:bundle-verify)
+          trap 'docker rm -v "$image_container" >/dev/null 2>&1 || true' EXIT
+          docker cp "$image_container:/app/reader-next" "$RUNNER_TEMP/reader-next-verify"
+          chmod +x "$RUNNER_TEMP/reader-next-verify"
+          EGRESS_VERIFY_IMAGE=reader-next:bundle-verify \
+          READER_BINARY="$RUNNER_TEMP/reader-next-verify" \
+          EGRESS_VERIFY_OUTPUT="$GITHUB_WORKSPACE/bundle-check-logs/source-reading" \
+          node docker/egress/verify.mjs
+
       - name: Upload bundle verification logs
         if: always()
         uses: actions/upload-artifact@v4

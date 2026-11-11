@@ -14,6 +14,7 @@ const temporary=mkdtempSync(tmpdir()+'/reader-egress-');
 const project='reader-egress-'+process.pid+'-'+Date.now();
 const network=project+'-network', control=project+'-control', protectedName=project+'-renderer';
 const records=[], results=[], commands=[], apiResponses=[];
+const bundledImage=process.env.EGRESS_VERIFY_IMAGE || 'reader-next:egress-verify';
 let app;
 function docker(args, name, env=process.env) {
     const lf=String.fromCharCode(10);
@@ -73,14 +74,15 @@ try {
     const normalURL='http://'+gateway+':'+normal.address().port;
     const hostAddresses=Object.values(networkInterfaces()).flat().filter(a=>a && a.family==='IPv4' && !a.internal).map(a=>a.address+'/32');
     assert.ok(hostAddresses.length);
-    const env={...process.env,EGRESS_DENY_CIDRS:hostAddresses.join(' '),EGRESS_ALLOW_TCP:gateway+':'+normal.address().port};
+    const env={...process.env,READER_IMAGE:bundledImage,EGRESS_DENY_CIDRS:hostAddresses.join(' '),EGRESS_ALLOW_TCP:gateway+':'+normal.address().port};
     writeFileSync(output+'/test-policy.json',JSON.stringify({hostAddresses,testOnlyAllow:env.EGRESS_ALLOW_TCP,forbiddenURL,normalURL},null,2));
     writeFileSync(temporary+'/override.yml',JSON.stringify({
         services:{'remote-webview':{container_name:protectedName}},
         networks:{default:{external:true,name:network}}
     }));
-    docker([...compose,'build','renderer-net','remote-webview'],'build.txt',env);
-    docker(['run','-d','--name',control,'--network',network,'--cap-drop','ALL','reader-next-webview:3.2.0-postfix3']);
+    if(!process.env.EGRESS_VERIFY_IMAGE) docker(['build','-t',bundledImage,root],'build.txt',env);
+    assert.equal(docker(['image','inspect','-f','{{index .Config.Labels "io.reader-next.bundled-webview"}}',bundledImage]),'1','Use an image with bundled WebView');
+    docker(['run','-d','--name',control,'--network',network,'--cap-drop','ALL','--security-opt','no-new-privileges',bundledImage,'webview']);
     const controlIP=docker(['inspect','-f','{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}',control]);
     const controlBase='http://'+controlIP+':8050';
     await ready(controlBase);
@@ -140,7 +142,7 @@ try {
     docker(['exec',gatewayID,'iptables-save'],'iptables.txt');
     docker(['exec',gatewayID,'iptables','-t','nat','-S'],'dns-nat.txt');
     docker(['exec',gatewayID,'ip','route','show'],'routes.txt');
-    docker(['exec',gatewayID,'sha256sum','/start.sh'],'policy-source-sha256.txt');
+    docker(['exec',gatewayID,'sha256sum','/app/egress/start.sh'],'policy-source-sha256.txt');
     docker(['exec',gatewayID,'ip6tables-save'],'ip6tables.txt');
     docker(['inspect',protectedName,gatewayID],'containers.json');
     writeFileSync(output+'/results.json',JSON.stringify({passed:true,unprotectedControl:before,results,forbiddenHitsBefore:hits,forbiddenHitsAfter:records.filter(r=>r.kind==='forbidden').length,normalFirstChapter:true},null,2));
@@ -150,7 +152,7 @@ try {
     writeFileSync(output+'/reader-responses.json',JSON.stringify(apiResponses,null,2));
     app?.kill('SIGTERM');
     normal.close();forbidden.close();
-    try{docker([...compose,'down','--timeout','5'],'down.txt',{...process.env,EGRESS_DENY_CIDRS:'127.0.0.1/32',EGRESS_ALLOW_TCP:''})}catch{}
+    try{docker([...compose,'down','--timeout','5'],'down.txt',{...process.env,READER_IMAGE:bundledImage,EGRESS_DENY_CIDRS:'127.0.0.1/32',EGRESS_ALLOW_TCP:''})}catch{}
     try{docker(['rm','-f',control])}catch{}
     try{docker(['network','rm',network])}catch{}
     writeFileSync(output+'/commands.json',JSON.stringify(commands,null,2));
