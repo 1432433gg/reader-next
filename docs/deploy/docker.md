@@ -34,15 +34,15 @@ Architectures:
 Run from the repository root:
 
 ```bash
-cp docker/env.docker.example .env.docker
-docker compose -f docker/compose.yml up -d
+cp docker/env.docker.example docker/.env.docker
+docker compose --env-file docker/.env.docker -f docker/compose.yml up -d
 ```
 
 Upgrade:
 
 ```bash
-docker compose -f docker/compose.yml pull
-docker compose -f docker/compose.yml up -d
+docker compose --env-file docker/.env.docker -f docker/compose.yml pull
+docker compose --env-file docker/.env.docker -f docker/compose.yml up -d
 ```
 
 Runtime contract:
@@ -51,13 +51,17 @@ Runtime contract:
 - Persistent data: `/app/storage`.
 - Static frontend: `/app/web/dist`.
 - Default database URL: `sqlite:/app/storage/reader.db?mode=rwc`.
-- Secrets stay in `.env.docker`; never bake `SECURE_KEY` or `INVITE_CODE` into the image.
+- Secrets stay in `docker/.env.docker`; never bake `SECURE_KEY` or `INVITE_CODE` into the image.
+
+## Prerelease
+
+See [v1.1.7-beta.1](../releases/v1.1.7-beta.1.md) for the testing image and Chinese Remote WebView setup instructions.
 
 ## Optional Remote WebView
 
 Most sources use the regular HTTP client. Sources whose parsed request rule sets `webView` use the renderer configured by `REMOTE_WEBVIEW_URL`; if no renderer is configured, those requests return a clear error and do not fall back to HTTP.
 
-To run the optional renderer in the same Compose network, set this in `.env.docker`:
+To run the optional renderer in the same Compose network, set this in `docker/.env.docker`:
 
 ```dotenv
 REMOTE_WEBVIEW_URL=http://remote-webview:8050
@@ -68,7 +72,7 @@ The profile builds the bundled POST compatibility repair from the pinned upstrea
 For production, configure the host-address deny list and use the isolated profile described in [renderer egress isolation](../../docker/egress/README.md). Build and start it with both Compose files:
 
 ```bash
-docker compose -f docker/compose.yml -f docker/compose.egress.yml --profile webview up -d --build
+docker compose --env-file docker/.env.docker -f docker/compose.yml -f docker/compose.egress.yml --profile webview up -d --build
 ```
 
 The bundled renderer serializes browser tasks through browser shutdown, uses a 15-second whole-request deadline (including queue time), and cancels work when the caller disconnects. This keeps a timed-out task from leaving a browser running alongside the next task. Each renderer process runs at most one browser task; higher Reader-side concurrency can queue at the renderer.

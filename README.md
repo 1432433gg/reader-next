@@ -24,15 +24,19 @@ docker run -d \
 或者在仓库目录里用 Compose：
 
 ```bash
-cp docker/env.docker.example .env.docker   # 改端口、登录、用户数、邀请码等
-docker compose -f docker/compose.yml up -d
+cp docker/env.docker.example docker/.env.docker   # 改端口、登录、用户数、邀请码等
+docker compose --env-file docker/.env.docker -f docker/compose.yml up -d
 ```
 
-升级：`docker compose -f docker/compose.yml pull && docker compose -f docker/compose.yml up -d`。
+升级：`docker compose --env-file docker/.env.docker -f docker/compose.yml pull && docker compose --env-file docker/.env.docker -f docker/compose.yml up -d`。
 
 打开 `http://服务器地址:18080`。默认不用登录；要开登录就设 `SECURE=true`，第一个注册的账号是管理员。
 
 数据库、上传的书和缓存都在容器的 `/app/storage`，一定要挂载 volume 或宿主机目录，不然删容器就丢数据。
+
+## 测试版与 Remote WebView
+
+[v1.1.7-beta.1 测试说明](docs/releases/v1.1.7-beta.1.md)包含镜像安装和文字书源改进。动态书源可启用可选 Remote WebView，浏览器镜像约1.48 GB，默认渲染并发1。启用与隔离配置见 [Docker部署](docs/deploy/docker.md)。
 
 ## 要求
 
@@ -49,7 +53,7 @@ docker compose -f docker/compose.yml up -d
 
 ## 配置
 
-从 `.env` 或环境变量读取，完整示例见 `.env.example`；Docker 部署写在 `.env.docker` 里。
+从 `.env` 或环境变量读取，完整示例见 `.env.example`；Docker 部署写在 `docker/.env.docker` 里。
 
 | 配置 | 默认值 | 说明 |
 | --- | --- | --- |
