@@ -1,9 +1,8 @@
 services:
   renderer-net:
-    image: reader-next-egress:1
-    build:
-      context: ./egress
-    pull_policy: build
+    image: ${READER_IMAGE:-ghcr.io/1432433gg/reader-next:latest}
+    command: ["egress"]
+    user: "0:0"
     restart: unless-stopped
     profiles: ["webview"]
     cap_drop: ["ALL"]

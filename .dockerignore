@@ -37,3 +37,7 @@ docs/.vitepress/dist/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Bundled renderer dependencies and verification output
+docker/remote-webview/node_modules/
+bundle-check-logs/

@@ -4,10 +4,6 @@
 
 ## 使用
 
-### VPS 一键安装
-
-用 [mihomo-next](https://github.com/1432433gg/mihomo-next) 的脚本，选「1. 安装（Mihomo + Reality + Caddy + Reader）」，HTTPS 证书和反向代理一起装好，之后在脚本菜单里更新 Reader。
-
 ### Docker
 
 镜像 `ghcr.io/1432433gg/reader-next`，标签 `latest` 和版本号 `x.y.z`，amd64 和 arm64 都有。
@@ -34,9 +30,9 @@ docker compose --env-file docker/.env.docker -f docker/compose.yml up -d
 
 数据库、上传的书和缓存都在容器的 `/app/storage`，一定要挂载 volume 或宿主机目录，不然删容器就丢数据。
 
-## 测试版与 Remote WebView
+## Remote WebView
 
-[v1.1.7-beta.1 测试说明](docs/releases/v1.1.7-beta.1.md)包含镜像安装和文字书源改进。动态书源可启用可选 Remote WebView，浏览器镜像约1.48 GB，默认渲染并发1。启用与隔离配置见 [Docker部署](docs/deploy/docker.md)。
+Remote WebView 为需要执行网页脚本的文字书源提供渲染支持，可读取动态加载的搜索结果、章节目录和正文。启用后，照常导入书源、搜索和阅读。
 
 ## 要求
 
@@ -68,6 +64,7 @@ docker compose --env-file docker/.env.docker -f docker/compose.yml up -d
 | `USER_BOOK_LIMIT` | `2000` | 每个账号最多几本书 |
 | `LOG_LEVEL` | `info` | 日志级别，`off` 不输出 |
 | `REQUEST_TIMEOUT_SECS` | `15` | 请求书源的超时（秒） |
+| `REMOTE_WEBVIEW_URL` | 空 | 可选的网页渲染服务地址 |
 | `CHAPTER_UPDATE_INTERVAL_HOURS` | `24` | 新章节自动检查间隔（小时），`0` 关闭 |
 | `CHAPTER_UPDATE_CONCURRENCY` | `3` | 新章节检查同时请求的书源数 |
 
@@ -106,7 +103,7 @@ CHANGELOG.md          更新记录
 | `/app/web/dist` | 前端页面 |
 | `/app/storage` | 数据，要挂载：`reader.db`（SQLite）、`assets/`（上传的书、封面）、章节缓存 |
 
-本地运行时对应 `frontend/dist/` 和 `storage/`（不提交 Git）。用 mihomo-next 装的，数据在 Docker 卷 `reader-next_reader-data`，设置在 `/etc/mihomo-next/reader.env`。
+本地运行时对应 `frontend/dist/` 和 `storage/`（不提交 Git）。
 
 ## 开发
 

@@ -1,6 +1,8 @@
 #!/bin/sh
-set -e
+set -eu
 rm -f /run/egress-ready
+: "${EGRESS_DENY_CIDRS:?Configure every host public/NAT IPv4 as /32}"
+EGRESS_ALLOW_TCP=${EGRESS_ALLOW_TCP:-}
 
 # Resolve Docker DNS's actual post-DNAT ports, rather than allowing every
 # service that could be bound to the resolver's loopback address.

@@ -48,7 +48,7 @@ export EGRESS_DENY_CIDRS="$(ip -o -4 addr show scope global | awk '{sub(/\/.*/, 
 # sensitive IPv4 CIDRs to EGRESS_DENY_CIDRS before starting.
 export EGRESS_ALLOW_TCP=""
 docker compose -f docker/compose.yml -f docker/compose.egress.yml --profile webview config
-docker compose -f docker/compose.yml -f docker/compose.egress.yml --profile webview up -d --build
+docker compose -f docker/compose.yml -f docker/compose.egress.yml --profile webview up -d
 ~~~
 
 Set REMOTE_WEBVIEW_URL=http://remote-webview:8050 in docker/.env.docker, as in the
@@ -56,8 +56,8 @@ normal deployment instructions. This override requires EGRESS_DENY_CIDRS
 explicitly set and fails configuration if it is missing.
 
 The base Compose file alone is the development topology. The two-file command
-above is the declared isolated WebView deployment. It adds a small helper image
-built from a pinned Alpine digest with iptables and iproute2. No Docker socket,
+above is the declared isolated WebView deployment. The helper uses the same bundled Reader image with the `egress` entry mode.
+iptables and iproute2 are included at image build time. No Docker socket,
 host network, host PID namespace or host filesystem mount is needed.
 
 The scripts use iptables-restore and ip6tables-restore atomically. A restart
@@ -66,7 +66,7 @@ is recreated, recreate both services together so the renderer joins the current
 protected namespace:
 
 ~~~sh
-docker compose -f docker/compose.yml -f docker/compose.egress.yml --profile webview up -d --build --force-recreate renderer-net remote-webview
+docker compose -f docker/compose.yml -f docker/compose.egress.yml --profile webview up -d --force-recreate renderer-net remote-webview
 ~~~
 
 Inspect configuration and the live rules:
@@ -113,3 +113,7 @@ Validation exceptions are created in the verifier's private test project.
 Keep EGRESS_ALLOW_TCP empty in production unless a narrowly scoped trusted
 service exception is deliberately required. Removing the override changes the
 declared isolation boundary; repeat verification after policy or topology changes.
+
+## Bundled image verification
+
+The published bundled image is checked with `bash docker/tests/run-bundled-smoke.sh IMAGE` on each native architecture before publishing. This covers image role startup, actual WebKit GET/POST, UTF-8 headers/body, empty POST without a second GET, controlled redirect/subrequest isolation and Reader startup. The older `verify.mjs` above retains its standalone development builds and broader source-reading fixture; it is not the bundled-image CI test.

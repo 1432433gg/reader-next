@@ -13,8 +13,6 @@ docker/
 .github/workflows/docker-publish.yml # multi-arch GHCR publishing
 ```
 
-Deploying behind a reverse proxy on a VPS (Caddy, Reality, etc.) is handled by [mihomo-next](https://github.com/1432433gg/mihomo-next), not by files in this repository.
-
 ## Published image
 
 Default image repo: `ghcr.io/1432433gg/reader-next`.
@@ -55,7 +53,7 @@ Runtime contract:
 
 ## Prerelease
 
-See [v1.1.7-beta.1](../releases/v1.1.7-beta.1.md) for the testing image and Chinese Remote WebView setup instructions.
+See [v1.1.7-beta.2](../releases/v1.1.7-beta.2.md) for the testing image and Chinese Remote WebView setup instructions.
 
 ## Optional Remote WebView
 
@@ -67,17 +65,33 @@ To run the optional renderer in the same Compose network, set this in `docker/.e
 REMOTE_WEBVIEW_URL=http://remote-webview:8050
 ```
 
-The profile builds the bundled POST compatibility repair from the pinned upstream 3.2.0 digest. It preserves caller Content-Type and UTF-8 body bytes, and handles an empty POST response without a second GET. Rebuild after updating the bundled renderer files.
+Use a published Reader image that supports Remote WebView. The renderer is included in that image, so deployment only needs a pull and start.
 
-For production, configure the host-address deny list and use the isolated profile described in [renderer egress isolation](../../docker/egress/README.md). Build and start it with both Compose files:
+The isolated profile requires Linux Docker Engine and Compose supporting the `!reset` tag. Set every public/NAT IPv4 address of your server in `docker/.env.docker`, with `/32` after each address and spaces between them:
 
-```bash
-docker compose --env-file docker/.env.docker -f docker/compose.yml -f docker/compose.egress.yml --profile webview up -d --build
+```dotenv
+EGRESS_DENY_CIDRS=your_server_public_IPv4/32
+EGRESS_ALLOW_TCP=
 ```
 
-The bundled renderer serializes browser tasks through browser shutdown, uses a 15-second whole-request deadline (including queue time), and cancels work when the caller disconnects. This keeps a timed-out task from leaving a browser running alongside the next task. Each renderer process runs at most one browser task; higher Reader-side concurrency can queue at the renderer.
+Replace the example with actual addresses. Leave `EGRESS_ALLOW_TCP` empty unless an internal source specifically requires an `IPv4:port` exception. This preset requires public IPv4 connectivity.
 
-The renderer is reachable by the Reader container on the Compose network and has no host port mapping. The supplied egress override filters renderer connections at the network-namespace firewall, including redirects and secondary requests. Follow its host public-address configuration, trusted-service exception rules, IPv4 scope and controlled verification steps. The Reader service has a separate namespace and can receive its own ordinary-HTTP egress policy as required by the deployment.
+Start or upgrade from the repository root:
+
+```bash
+docker compose --env-file docker/.env.docker -f docker/compose.yml -f docker/compose.egress.yml --profile webview config
+docker compose --env-file docker/.env.docker -f docker/compose.yml -f docker/compose.egress.yml --profile webview pull
+docker compose --env-file docker/.env.docker -f docker/compose.yml -f docker/compose.egress.yml --profile webview up -d --force-recreate renderer-net remote-webview
+docker compose --env-file docker/.env.docker -f docker/compose.yml -f docker/compose.egress.yml --profile webview up -d reader
+```
+
+Then import your source and search/read normally. Check service status with:
+
+```bash
+docker compose --env-file docker/.env.docker -f docker/compose.yml -f docker/compose.egress.yml --profile webview ps
+```
+
+After a server address change, update `EGRESS_DENY_CIDRS` and run the start commands again. Keep the existing storage volume when upgrading.
 
 ## Local dual-db workflow
 

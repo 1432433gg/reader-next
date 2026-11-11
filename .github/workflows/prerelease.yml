@@ -60,6 +60,6 @@ jobs:
         run: |
           gh release create "$RELEASE_TAG" \
             --target "$GITHUB_SHA" \
-            --title "$RELEASE_TAG 测试版" \
+            --title "$RELEASE_TAG" \
             --prerelease --latest=false \
             --notes-file "docs/releases/$RELEASE_TAG.md"
