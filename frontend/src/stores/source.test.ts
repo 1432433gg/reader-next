@@ -27,7 +27,6 @@ describe('source store cache', () => {
     await store.fetchSources()
 
     expect(getBookSources).toHaveBeenCalledTimes(1)
-    expect(getBookSources).toHaveBeenCalledWith({ exactIntegers: true })
     expect(store.sources[0]?.bookSourceName).toBe('A')
 
     await store.fetchSources({ force: true })

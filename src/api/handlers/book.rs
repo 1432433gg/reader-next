@@ -41,8 +41,6 @@ const DEFAULT_GLOBAL_EXPLORE_CONCURRENT: usize = 16;
 const MAX_GLOBAL_EXPLORE_CONCURRENT: usize = 24;
 const DEFAULT_GLOBAL_EXPLORE_SCAN_LIMIT: usize = 96;
 const MAX_GLOBAL_EXPLORE_SCAN_LIMIT: usize = 120;
-const DEFAULT_MULTI_SOURCE_SEARCH_CONCURRENCY: usize = 4;
-const MAX_MULTI_SOURCE_SEARCH_CONCURRENCY: usize = 24;
 
 #[derive(Debug, Deserialize)]
 pub struct SearchBookRequest {
@@ -62,8 +60,6 @@ pub struct SearchBookMultiRequest {
     book_source_urls: Option<Vec<String>>,
     #[serde(rename = "bookSourceGroup")]
     book_source_group: Option<String>,
-    #[serde(rename = "concurrentCount")]
-    concurrent_count: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -314,10 +310,6 @@ pub async fn search_book_multi(
         .key
         .ok_or_else(|| AppError::BadRequest("key required".to_string()))?;
     let page = req.page.unwrap_or(1);
-    let concurrent = req
-        .concurrent_count
-        .unwrap_or(DEFAULT_MULTI_SOURCE_SEARCH_CONCURRENCY)
-        .clamp(1, MAX_MULTI_SOURCE_SEARCH_CONCURRENCY);
 
     let sources = if let Some(urls) = req.book_source_urls {
         let mut out = Vec::new();
@@ -335,19 +327,18 @@ pub async fn search_book_multi(
         list
     };
 
+    let mut tasks = Vec::new();
+    for source in sources {
+        let svc = state.book_service.clone();
+        let k = key.clone();
+        let user_ns = user_ns.clone();
+        tasks.push(tokio::spawn(async move {
+            svc.search_book(&user_ns, &source, &k, page).await
+        }));
+    }
     let mut results: Vec<crate::model::search::SearchBook> = Vec::new();
-    let service = state.book_service.clone();
-    let namespace = user_ns.clone();
-    let search_key = key.clone();
-    let mut tasks = futures::stream::iter(sources.into_iter().map(|source| {
-        let service = service.clone();
-        let namespace = namespace.clone();
-        let search_key = search_key.clone();
-        async move { service.search_book(&namespace, &source, &search_key, page).await }
-    }))
-    .buffer_unordered(concurrent);
-    while let Some(result) = tasks.next().await {
-        if let Ok(list) = result {
+    for t in tasks {
+        if let Ok(Ok(list)) = t.await {
             results.extend(list);
         }
     }
@@ -2303,11 +2294,7 @@ pub async fn search_book_multi_sse(
     let key = q.key.unwrap_or_default();
     let last_index = q.last_index.unwrap_or(-1);
     let search_size = q.search_size.unwrap_or(50).max(1) as usize;
-    let concurrent = q
-        .concurrent_count
-        .unwrap_or(DEFAULT_MULTI_SOURCE_SEARCH_CONCURRENCY as i32)
-        .clamp(1, MAX_MULTI_SOURCE_SEARCH_CONCURRENCY as i32)
-        as usize;
+    let concurrent = q.concurrent_count.unwrap_or(24).max(1) as usize;
     let book_source_url =
         q.book_source_url
             .clone()

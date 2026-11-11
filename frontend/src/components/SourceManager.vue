@@ -11,17 +11,15 @@
             :total="sourceStats.total"
             :enabled="sourceStats.enabled"
             :filtered="sourceStats.filtered"
-            :selected="explicitlySelectedSources.length"
+            :selected="selectedFilteredSources.length"
             :loading="loading"
             :testing="testingSources"
             :invalid-count="invalidSources.length"
-            :test-concurrency="testConcurrency"
             @refresh="loadSources"
             @import-local="triggerFileImport"
             @open-subscriptions="subscriptionPanelVisible = true"
             @export="exportSources"
             @test-sources="testSources"
-            @update-test-concurrency="updateTestConcurrency"
             @delete-invalid="removeInvalidSources"
             @create="createSource"
             @close="close"
@@ -98,19 +96,6 @@
       @close="subscriptionPanelVisible = false"
     />
 
-    <SourceImportPreview
-      :visible="importPreviewVisible"
-      :title="importTitle"
-      :entries="importEntries"
-      :snapshot-sources="importSnapshotSources"
-      :current-sources="sources"
-      :snapshot-version="importSnapshotVersion"
-      :notice="importNotice"
-      :loading="importSaving"
-      @close="closeImportPreview"
-      @apply="applyImportChoices"
-    />
-
     <Transition name="scale">
       <div v-if="loginPreviewVisible" class="login-preview-container" @click.self="loginPreviewVisible = false">
         <div class="login-preview-modal">
@@ -138,13 +123,12 @@ import {
   deleteBookSource,
   deleteBookSources,
   deleteInvalidBookSources,
-  DEFAULT_SOURCE_TEST_CONCURRENCY,
-  importBookSources,
-  MAX_SOURCE_TEST_CONCURRENCY,
   loginBookSource,
   saveBookSource,
+  saveBookSources,
   testBookSources,
-  readRemoteSourcePackage,
+  readRemoteSourceFile,
+  readSourceFile,
 } from '../api/source'
 import { useAppStore } from '../stores/app'
 import { useSourceStore } from '../stores/source'
@@ -162,10 +146,8 @@ import SourceEditorPanel from './source-manager/SourceEditorPanel.vue'
 import SourceFilterBar from './source-manager/SourceFilterBar.vue'
 import SourceList from './source-manager/SourceList.vue'
 import SourceManagerHeader from './source-manager/SourceManagerHeader.vue'
-import SourceImportPreview, { type SourceImportChoice } from './source-manager/SourceImportPreview.vue'
 import SourceSubscriptionPanel from './source-manager/SourceSubscriptionPanel.vue'
 import { storeToRefs } from 'pinia'
-import { parseBookSourceImport, type SourceImportEntry } from '../utils/sourceImport'
 
 type SourceSubscription = {
   url: string
@@ -187,7 +169,6 @@ const sourceStore = useSourceStore()
 const { sources, loading } = storeToRefs(sourceStore)
 
 const testingSources = ref(false)
-const testConcurrency = ref(DEFAULT_SOURCE_TEST_CONCURRENCY)
 const filterText = ref('')
 const filterGroup = ref('')
 const fileInputRef = ref<HTMLInputElement | null>(null)
@@ -196,14 +177,6 @@ const selectedSourceUrls = ref(new Set<string>())
 const subscriptionPanelVisible = ref(false)
 const remoteUrl = ref('')
 const subscriptions = ref<SourceSubscription[]>(loadSubscriptions())
-const importPreviewVisible = ref(false)
-const importTitle = ref('书源导入预览')
-const importEntries = ref<SourceImportEntry[]>([])
-const importSnapshotSources = ref<BookSource[]>([])
-const importSnapshotVersion = ref(0)
-const importNotice = ref('')
-const importSaving = ref(false)
-const pendingSubscriptionSync = ref<string | null>(null)
 
 const editingSource = ref<BookSource | null>(null)
 const editorText = ref(JSON.stringify(createEmptySource(), null, 2))
@@ -227,10 +200,6 @@ const selectedFilteredSources = computed(() =>
 
 const invalidSources = computed(() =>
   sources.value.filter((source) => hasSourceGroup(source, '失效'))
-)
-
-const explicitlySelectedSources = computed(() =>
-  sources.value.filter((source) => selectedSourceUrls.value.has(source.bookSourceUrl))
 )
 
 const allFilteredSelected = computed(() =>
@@ -328,12 +297,13 @@ async function removeSelectedSources() {
 }
 
 async function testSources() {
-  const targets = explicitlySelectedSources.value
+  const targets = selectedFilteredSources.value.length ? selectedFilteredSources.value : sources.value
   if (!targets.length) {
-    appStore.showToast('请先明确选择要检测的书源', 'warning')
+    appStore.showToast('没有可测试的书源', 'warning')
     return
   }
-  if (!confirm(`将检测明确选择的 ${targets.length} 个书源，并请求对应站点。并发数：${testConcurrency.value}。是否继续？`)) return
+  const scopeText = selectedFilteredSources.value.length ? `选中的 ${targets.length}` : `全部 ${targets.length}`
+  if (!confirm(`将测试${scopeText} 个书源。测试会请求外部站点，耗时可能较长，是否继续？`)) return
 
   testingSources.value = true
   try {
@@ -344,7 +314,7 @@ async function testSources() {
         await testBookSources({
           bookSourceUrls: batch,
           markInvalid: true,
-          concurrent: testConcurrency.value,
+          concurrent: 12,
         })
       )
     }
@@ -362,12 +332,6 @@ async function testSources() {
   } finally {
     testingSources.value = false
   }
-}
-
-function updateTestConcurrency(value: number) {
-  testConcurrency.value = Number.isFinite(value)
-    ? Math.max(1, Math.min(MAX_SOURCE_TEST_CONCURRENCY, Math.trunc(value)))
-    : DEFAULT_SOURCE_TEST_CONCURRENCY
 }
 
 async function removeInvalidSources() {
@@ -528,13 +492,16 @@ async function handleFileImport(event: Event) {
   const input = event.target as HTMLInputElement
   const file = input.files?.[0]
   if (!file) return
-  importEntries.value = []
-  importNotice.value = ''
   try {
-    const text = await file.text()
-    await prepareImportPreview(text, file.name, '本地书源导入预览')
+    const imported = await readSourceFile(file)
+    if (!imported.length) {
+      throw new Error('文件中没有可导入的书源')
+    }
+    await saveBookSources(imported)
+    appStore.showToast(`成功导入 ${imported.length} 个书源`, 'success')
+    await loadSources()
   } catch (e: unknown) {
-    appStore.showToast((e as Error).message || '读取导入文件失败', 'error')
+    appStore.showToast((e as Error).message || '导入失败', 'error')
   } finally {
     input.value = ''
   }
@@ -545,68 +512,25 @@ async function importRemoteSource() {
     appStore.showToast('请输入远程书源链接', 'warning')
     return
   }
-  importEntries.value = []
-  importNotice.value = ''
   try {
-    const url = remoteUrl.value.trim()
-    const text = await readRemoteSourcePackage(url)
-    await prepareImportPreview(text, url, '远程书源导入预览', url)
+    const raw = await readRemoteSourceFile(remoteUrl.value)
+    const parsed = raw.flatMap((item) => {
+      try {
+        const value = JSON.parse(item)
+        return Array.isArray(value) ? value : [value]
+      } catch {
+        return []
+      }
+    }) as BookSource[]
+    if (!parsed.length) {
+      throw new Error('远程书源文件为空或格式错误')
+    }
+    await saveBookSources(parsed)
+    touchSubscription(remoteUrl.value)
+    appStore.showToast(`成功同步 ${parsed.length} 个书源`, 'success')
+    await loadSources()
   } catch (e: unknown) {
     appStore.showToast((e as Error).message || '远程同步失败', 'error')
-  }
-}
-
-async function prepareImportPreview(text: string, label: string, title: string, subscriptionUrl?: string) {
-  await sourceStore.fetchSources({ force: true })
-  importEntries.value = parseBookSourceImport(text, label)
-  importTitle.value = title
-  importSnapshotSources.value = cloneSources(sources.value)
-  importSnapshotVersion.value += 1
-  importNotice.value = ''
-  pendingSubscriptionSync.value = subscriptionUrl || null
-  importPreviewVisible.value = true
-}
-
-function cloneSources(items: BookSource[]) {
-  return JSON.parse(JSON.stringify(items)) as BookSource[]
-}
-
-function closeImportPreview() {
-  importPreviewVisible.value = false
-  pendingSubscriptionSync.value = null
-  importEntries.value = []
-  importSnapshotSources.value = []
-  importNotice.value = ''
-}
-
-async function applyImportChoices(choices: SourceImportChoice[]) {
-  if (!choices.length || importSaving.value) return
-  importSaving.value = true
-  importNotice.value = ''
-  try {
-    const result = await importBookSources(choices.map(({ source, action, expectedExisting }) => ({
-      source,
-      action,
-      ...(expectedExisting ? { expectedExisting } : {}),
-    })))
-    const subscriptionUrl = pendingSubscriptionSync.value
-    closeImportPreview()
-    if (subscriptionUrl) touchSubscription(subscriptionUrl)
-    await loadSources()
-    appStore.showToast(`导入完成：新增 ${result.added} 个，覆盖 ${result.overwritten} 个`, 'success')
-  } catch (e: unknown) {
-    const message = (e as Error).message || '导入保存失败，请重新检查选择'
-    try {
-      await sourceStore.fetchSources({ force: true })
-      importSnapshotSources.value = cloneSources(sources.value)
-      importSnapshotVersion.value += 1
-    } catch {
-      // Keep the last snapshot; the backend still verifies it before any write.
-    }
-    importNotice.value = `${message} 已刷新当前书源；请重新核对后再试。`
-    appStore.showToast(message, 'warning')
-  } finally {
-    importSaving.value = false
   }
 }
 

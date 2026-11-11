@@ -1,2 +1,0 @@
-FROM hectorqin/remote-webview@sha256:b61d8e86f69a743baa06aadb58cdba6d1e11c5baa45cec05a908d541ce9a684a
-COPY index.js /app/index.js

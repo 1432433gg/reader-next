@@ -75,8 +75,6 @@ export interface BookSource {
   enabledCookieJar?: boolean
   customOrder?: number
   weight?: number
-  lastUpdateTime?: number | string | null
-  respondTime?: number | string | null
   searchUrl?: string
   exploreUrl?: string
   header?: string

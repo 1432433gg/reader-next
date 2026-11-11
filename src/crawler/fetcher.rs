@@ -30,8 +30,6 @@ pub struct RequestSpec {
     pub web_view: bool,
     pub web_js: Option<String>,
     pub web_view_delay_time: u64,
-    #[serde(default)]
-    pub source_regex: Option<String>,
 }
 
 impl Default for RequestSpec {
@@ -49,7 +47,6 @@ impl Default for RequestSpec {
             web_view: false,
             web_js: None,
             web_view_delay_time: 0,
-            source_regex: None,
         }
     }
 }
@@ -174,7 +171,7 @@ pub async fn fetch(client: &HttpClient, req: RequestSpec) -> anyhow::Result<Fetc
     Err(last_err.unwrap_or_else(|| anyhow::anyhow!("fetch failed")))
 }
 
-pub(crate) fn decode_body(bytes: &[u8], charset: Option<&str>, content_type: Option<&str>) -> String {
+fn decode_body(bytes: &[u8], charset: Option<&str>, content_type: Option<&str>) -> String {
     let label = charset
         .map(str::trim)
         .filter(|value| !value.is_empty())

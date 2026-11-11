@@ -1423,67 +1423,30 @@ fn pick_json_field(v: &Value, rule: Option<&str>) -> Option<String> {
 
 fn resolve_url(base: &str, url: &str) -> String {
     let base = normalize_source_url(base);
-    let raw_url = normalize_source_url(url);
-    let (url_part, options) = split_url_options(&raw_url);
-    let url = normalize_source_url(strip_legacy_url_config(url_part));
+    let url = normalize_source_url(strip_url_config(url));
 
     if url.is_empty() {
-        return append_url_options(base.to_string(), options);
+        return base.to_string();
     }
     if url.starts_with("http://") || url.starts_with("https://") {
-        return append_url_options(url.to_string(), options);
+        return url.to_string();
     }
     if url.starts_with("//") {
-        return append_url_options(format!("https:{}", url), options);
+        return format!("https:{}", url);
     }
 
     let mut base_url = match url::Url::parse(&base) {
         Ok(u) => u,
-        Err(_) => return append_url_options(url.to_string(), options),
+        Err(_) => return url.to_string(),
     };
     base_url.set_fragment(None);
 
-    let resolved = match base_url.join(&url) {
+    match base_url.join(&url) {
         Ok(u) => u.to_string(),
         Err(_) => {
             let base = base.trim_end_matches('/');
             format!("{}/{}", base, url.trim_start_matches('/'))
         }
-    };
-    append_url_options(resolved, options)
-}
-
-fn split_url_options(url: &str) -> (&str, Option<&str>) {
-    for (idx, ch) in url.char_indices() {
-        if ch != ',' {
-            continue;
-        }
-        let options = url[idx + ch.len_utf8()..].trim_start();
-        if options.starts_with('{') {
-            let is_request_options = json5::from_str::<Value>(options)
-                .ok()
-                .and_then(|value| value.as_object().cloned())
-                .map(|options| {
-                    [
-                        "method", "charset", "headers", "body", "retry", "type", "serverID",
-                        "serverId", "webView", "webJs", "webViewDelayTime", "sourceRegex", "js",
-                    ]
-                    .iter()
-                    .any(|key| options.contains_key(*key))
-                })
-                .unwrap_or(false);
-            if is_request_options {
-                return (url[..idx].trim_end(), Some(options));
-            }
-        }
-    }
-    (url, None)
-}
-
-fn append_url_options(url: String, options: Option<&str>) -> String {
-    match options {
-        Some(options) => format!("{url},{options}"),
-        None => url,
     }
 }
 
@@ -1558,8 +1521,16 @@ fn interpolate_common_templates(
         .into_owned()
 }
 
-fn strip_legacy_url_config(url: &str) -> &str {
-    url.find("##$##").map(|idx| &url[..idx]).unwrap_or(url)
+fn strip_url_config(url: &str) -> &str {
+    if let Some(idx) = url.find("##$##") {
+        &url[..idx]
+    } else if let Some(idx) = url.find(",{'webView'") {
+        &url[..idx]
+    } else if let Some(idx) = url.find(",{\"webView\"") {
+        &url[..idx]
+    } else {
+        url
+    }
 }
 
 fn extract_js(rule: &str) -> (&str, Option<&str>) {
@@ -2339,60 +2310,6 @@ mod tests {
     use super::*;
     use crate::model::book_source::BookSource;
     use crate::model::rule::{BookInfoRule, SearchRule, TocRule};
-
-    #[test]
-    fn resolving_relative_or_absolute_links_preserves_request_options() {
-        let relative = r#"/chapter/1,{"webView":true,"webJs":"return true"}"#;
-        let absolute = r#"https://books.example/chapter/2,{"webView":true}"#;
-
-        assert_eq!(
-            resolve_url("https://books.example/search", relative),
-            r#"https://books.example/chapter/1,{"webView":true,"webJs":"return true"}"#
-        );
-        assert_eq!(
-            resolve_url("https://books.example/search", absolute),
-            absolute
-        );
-    }
-
-    #[test]
-    fn search_and_chapter_links_preserve_webview_options() {
-        let engine = RuleEngine::new().unwrap();
-        let source = BookSource {
-            book_source_name: "WebView links".to_string(),
-            book_source_url: "https://source.example".to_string(),
-            rule_search: Some(SearchRule {
-                book_list: Some("a.book".to_string()),
-                name: Some("@text".to_string()),
-                book_url: Some("@href".to_string()),
-                ..Default::default()
-            }),
-            rule_toc: Some(TocRule {
-                chapter_list: Some("a.chapter".to_string()),
-                chapter_name: Some("@text".to_string()),
-                chapter_url: Some("@href".to_string()),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-
-        let search = engine.search_books(
-            &source,
-            r#"<a class="book" href='/detail/1,{"webView":true}'>Book</a>"#,
-            "https://books.example/search",
-        );
-        assert_eq!(
-            search[0].book_url,
-            r#"https://books.example/detail/1,{"webView":true}"#
-        );
-
-        let (chapters, _) = engine.chapter_list(
-            &source,
-            r#"<a class="chapter" href='/chapter/1,{"webView":true}'>Chapter</a>"#,
-            &search[0].book_url,
-        );
-        assert_eq!(chapters[0].url, r#"https://books.example/chapter/1,{"webView":true}"#);
-    }
 
     #[test]
     fn test_detect_mode() {

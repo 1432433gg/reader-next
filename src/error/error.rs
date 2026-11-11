@@ -12,10 +12,6 @@ pub enum AppError {
     NotFound(String),
     #[error("bad request: {0}")]
     BadRequest(String),
-    #[error("conflict: {0}")]
-    Conflict(String),
-    #[error("upstream service: {0}")]
-    Upstream(String),
     #[error("internal error")]
     Internal(#[from] anyhow::Error),
     #[error("db error")]
@@ -60,15 +56,13 @@ impl<T> ApiResponse<T> {
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         match &self {
-            AppError::NotFound(_) | AppError::BadRequest(_) | AppError::Conflict(_) => tracing::debug!("{:?}", self),
-            AppError::Http(_) | AppError::Upstream(_) => tracing::warn!("{:?}", self),
+            AppError::NotFound(_) | AppError::BadRequest(_) => tracing::debug!("{:?}", self),
+            AppError::Http(_) => tracing::warn!("{:?}", self),
             AppError::Db(_) | AppError::Internal(_) => tracing::error!("{:?}", self),
         }
         let (status, message) = match &self {
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
-            AppError::Conflict(msg) => (StatusCode::CONFLICT, msg.clone()),
-            AppError::Upstream(msg) => (StatusCode::BAD_GATEWAY, msg.clone()),
             AppError::Db(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "database error".to_string(),

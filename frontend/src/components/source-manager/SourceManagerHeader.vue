@@ -19,17 +19,6 @@
       <button class="action-btn" type="button" @click="$emit('import-local')">本地导入</button>
       <button class="action-btn" type="button" @click="$emit('open-subscriptions')">远程同步</button>
       <button class="action-btn" type="button" @click="$emit('export')">导出</button>
-      <label class="test-concurrency">
-        检测并发
-        <input
-          type="number"
-          min="1"
-          max="6"
-          :value="testConcurrency"
-          aria-label="手动检测并发数"
-          @change="$emit('update-test-concurrency', Number(($event.target as HTMLInputElement).value))"
-        />
-      </label>
       <button class="action-btn" :disabled="testing || total === 0" type="button" @click="$emit('test-sources')">
         {{ testing ? '测试中...' : '测试书源' }}
       </button>
@@ -60,7 +49,6 @@ defineProps<{
   loading: boolean
   testing: boolean
   invalidCount: number
-  testConcurrency: number
 }>()
 
 defineEmits<{
@@ -69,7 +57,6 @@ defineEmits<{
   'open-subscriptions': []
   export: []
   'test-sources': []
-  'update-test-concurrency': [value: number]
   'delete-invalid': []
   create: []
   close: []
@@ -127,24 +114,6 @@ defineEmits<{
   padding: 8px 12px;
   font-size: 13px;
   white-space: nowrap;
-}
-
-.test-concurrency {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--color-text-secondary);
-  font-size: 12px;
-}
-
-.test-concurrency input {
-  width: 54px;
-  height: 36px;
-  padding: 4px 6px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-bg-elevated);
-  color: var(--color-text-primary);
 }
 
 .action-btn.primary {

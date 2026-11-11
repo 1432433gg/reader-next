@@ -1,5 +1,5 @@
 use crate::crawler::{
-    fetcher::{decode_body, fetch, FetchResponse, HttpMethod, RequestSpec, StrResponse},
+    fetcher::{fetch, FetchResponse, RequestSpec, StrResponse},
     http_client::HttpClient,
     url_analyzer::analyze_url,
 };
@@ -20,7 +20,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::fs;
-use tokio::sync::{Mutex, RwLock, Semaphore};
+use tokio::sync::{Mutex, RwLock};
 use tokio::time::{sleep, Duration, Instant};
 
 #[derive(Clone)]
@@ -32,9 +32,6 @@ pub struct BookService {
     bookshelf_write_lock: Arc<Mutex<()>>,
     source_cookies: Arc<RwLock<HashMap<String, String>>>,
     rate_states: Arc<RwLock<HashMap<String, RateState>>>,
-    remote_webview_url: Option<String>,
-    remote_webview_timeout: Duration,
-    remote_webview_semaphore: Arc<Semaphore>,
 }
 
 #[derive(Clone, Default)]
@@ -69,17 +66,7 @@ impl BookService {
             bookshelf_write_lock: Arc::new(Mutex::new(())),
             source_cookies: Arc::new(RwLock::new(HashMap::new())),
             rate_states: Arc::new(RwLock::new(HashMap::new())),
-            remote_webview_url: None,
-            remote_webview_timeout: Duration::from_secs(15),
-            remote_webview_semaphore: Arc::new(Semaphore::new(1)),
         }
-    }
-
-    pub fn with_remote_webview(mut self, base_url: &str, timeout: Duration) -> Self {
-        let base_url = base_url.trim().trim_end_matches('/');
-        self.remote_webview_url = (!base_url.is_empty()).then(|| base_url.to_string());
-        self.remote_webview_timeout = timeout;
-        self
     }
 
     pub fn http_client(&self) -> &reqwest::Client {
@@ -137,93 +124,11 @@ impl BookService {
         &self,
         source: &BookSource,
         spec: RequestSpec,
-    ) -> Result<FetchResponse, AppError> {
+    ) -> anyhow::Result<FetchResponse> {
         self.wait_for_rate(source).await;
-        let result = if spec.web_view {
-            self.fetch_remote_webview(spec).await
-        } else {
-            fetch(&self.http, spec).await.map_err(AppError::Internal)
-        };
+        let result = fetch(&self.http, spec).await;
         self.finish_rate(source).await;
         result
-    }
-
-    async fn fetch_remote_webview(&self, spec: RequestSpec) -> Result<FetchResponse, AppError> {
-        let base_url = self
-            .remote_webview_url
-            .as_deref()
-            .ok_or_else(|| {
-                AppError::Upstream("Remote WebView 未配置（REMOTE_WEBVIEW_URL）".to_string())
-            })?;
-        let permit = tokio::time::timeout(
-            self.remote_webview_timeout,
-            self.remote_webview_semaphore.acquire(),
-        )
-        .await
-        .map_err(|_| {
-            AppError::Upstream("Remote WebView 等待超时，请稍后重试".to_string())
-        })?
-        .map_err(|_| AppError::Upstream("Remote WebView 并发控制不可用".to_string()))?;
-
-        if spec.web_view_delay_time > 0 {
-            tokio::time::timeout(
-                self.remote_webview_timeout,
-                tokio::time::sleep(Duration::from_millis(spec.web_view_delay_time)),
-            )
-            .await
-            .map_err(|_| {
-                AppError::Upstream("Remote WebView 页面等待超时".to_string())
-            })?;
-        }
-
-        let endpoint = format!("{}/render.html", base_url);
-        let response = self
-            .http
-            .client()
-            .post(endpoint)
-            .json(&remote_webview_payload(&spec))
-            .send()
-            .await
-            .map_err(|_| AppError::Upstream("Remote WebView 请求失败或超时".to_string()))?;
-        let status = response.status().as_u16();
-        if !response.status().is_success() {
-            return Err(AppError::Upstream(format!(
-                "Remote WebView 渲染失败，服务返回状态 {status}"
-            )));
-        }
-        let content_type = response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_string);
-        let response_headers = response
-            .headers()
-            .iter()
-            .filter_map(|(name, value)| {
-                value
-                    .to_str()
-                    .ok()
-                    .map(|value| (name.to_string(), value.to_string()))
-            })
-            .collect::<Vec<_>>();
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|_| AppError::Upstream("无法读取 Remote WebView 渲染结果".to_string()))?;
-        let body = decode_body(&bytes, spec.charset.as_deref(), content_type.as_deref());
-        drop(permit);
-        validate_remote_webview_body(&body)?;
-
-        Ok(FetchResponse {
-            // Keep the requested page as parser context. Renderer redirects are not
-            // trusted as a new source URL unless a future response contract validates them.
-            url: spec.url,
-            status,
-            body,
-            content_type,
-            headers: response_headers,
-            is_successful: true,
-        })
     }
 
     async fn wait_for_rate(&self, source: &BookSource) {
@@ -319,7 +224,13 @@ impl BookService {
             .search_url
             .clone()
             .ok_or_else(|| AppError::BadRequest("missing search_url".to_string()))?;
-        tracing::info!("searching book from {}: page={}", source.book_source_name, page);
+        tracing::info!(
+            "searching book from {}: key={}, page={}, url={}",
+            source.book_source_name,
+            key,
+            page,
+            search_url
+        );
         let mut spec = analyze_url(&search_url, key, page, &source.book_source_url, source)
             .map_err(|e| {
                 tracing::error!("analyze_url failed: {:?}", e);
@@ -329,10 +240,7 @@ impl BookService {
         self.apply_source_cookie(user_ns, source, &mut spec.headers)
             .await;
 
-        tracing::debug!(
-            "search_book request mode: {}",
-            if spec.web_view { "Remote WebView (details redacted)" } else { "HTTP" }
-        );
+        tracing::debug!("search_book fetched spec: {:?}", spec);
         let res = self.fetch_with_rate(source, spec).await.map_err(|e| {
             tracing::error!("fetch failed: {:?}", e);
             e
@@ -698,7 +606,7 @@ impl BookService {
             }
             visited_urls.insert(current_url.clone());
 
-            tracing::debug!("get_content fetching page (URL redacted)");
+            tracing::debug!("get_content fetching: {}", current_url);
             let res = self
                 .fetch_source_url(user_ns, source, &current_url, &source.book_source_url)
                 .await?;
@@ -715,11 +623,11 @@ impl BookService {
 
             // Check for next page
             if let Some(next_url) = self.parser.next_content_url(source, &res.body, &res.url) {
-                tracing::debug!("get_content found a next content URL (value redacted)");
+                tracing::debug!("get_content found next_url: {}", next_url);
                 if should_follow_content_page(chapter_url, &current_url, &next_url) {
                     current_url = next_url;
                 } else {
-                    tracing::debug!("get_content next URL appears to be another chapter, stopping");
+                    tracing::debug!("get_content next_url appears to be next chapter, stopping");
                     break;
                 }
             } else {
@@ -1973,66 +1881,6 @@ fn sanitize_book_urls(book: &mut Book) {
     }
 }
 
-fn validate_remote_webview_body(body: &str) -> Result<(), AppError> {
-    // The specified renderer sends caught exceptions as text with HTTP 200.
-    // Match the exception and operation prefix, not text embedded in HTML.
-    let text = body.trim_start();
-    let Some((kind, message)) = text.split_once(": ") else {
-        return Ok(());
-    };
-    let exception = matches!(
-        kind,
-        "Error" | "TimeoutError" | "TypeError" | "ReferenceError" | "SyntaxError"
-    );
-    let renderer_failure = [
-        "page.", "browserType.", "browser.", "browserContext.",
-        "connect ", "getaddrinfo ", "socket hang up", "Invalid URL",
-    ]
-    .iter()
-    .any(|prefix| message.starts_with(prefix));
-    if exception && renderer_failure {
-        return Err(AppError::Upstream(
-            "Remote WebView 渲染失败：浏览器导航、执行或连接错误".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-fn remote_webview_payload(spec: &RequestSpec) -> serde_json::Value {
-    let mut headers = serde_json::Map::new();
-    for (name, value) in &spec.headers {
-        headers.insert(name.clone(), serde_json::Value::String(value.clone()));
-    }
-    let mut payload = serde_json::Map::new();
-    payload.insert("url".to_string(), serde_json::json!(spec.url.as_str()));
-    payload.insert("headers".to_string(), serde_json::Value::Object(headers));
-    payload.insert(
-        "http_method".to_string(),
-        serde_json::json!(match &spec.method {
-            HttpMethod::GET => "GET",
-            HttpMethod::POST => "POST",
-        }),
-    );
-    payload.insert(
-        "body".to_string(),
-        spec.body
-            .as_ref()
-            .map(|value| serde_json::Value::String(value.clone()))
-            .unwrap_or(serde_json::Value::Null),
-    );
-    payload.insert(
-        "js_source".to_string(),
-        spec.web_js
-            .as_ref()
-            .map(|value| serde_json::Value::String(value.clone()))
-            .unwrap_or(serde_json::Value::Null),
-    );
-    if let Some(source_regex) = &spec.source_regex {
-        payload.insert("sourceRegex".to_string(), serde_json::json!(source_regex));
-    }
-    serde_json::Value::Object(payload)
-}
-
 fn progress_updated_at(book: &Book) -> i64 {
     book.dur_chapter_time.unwrap_or(0)
 }
@@ -2124,97 +1972,6 @@ fn content_type_from_ext(ext: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn stored_webview_rule_interpolates_request_data_and_keeps_scripts_literal() {
-        let script = r#"const searchKey = {"left":1,"right":2}; document.title = searchKey.left + "{{literal}} @js:";"#;
-        let regex = r#"<main>searchKey(.*?)</main>"#;
-        let options = json!({
-            "method": "POST",
-            "headers": {"Content-Type": "application/json", "X-Page": "searchPage"},
-            "body": r#"{"nested":{"keyword":"{key}","page":"{page}"}}"#,
-            "webView": true,
-            "webJs": script,
-            "sourceRegex": regex,
-        });
-        let source = crate::model::book_source::book_source_from_value(json!({
-            "bookSourceName": "Dynamic",
-            "bookSourceUrl": "https://example.com",
-            "searchUrl": format!("/search?page=<1,2>,{options}"),
-        }))
-        .unwrap();
-        for keyword in ["two words", r#"say "searchPage""#] {
-            let spec = analyze_url(
-                source.search_url.as_deref().unwrap(), keyword, 2, &source.book_source_url, &source,
-            )
-            .unwrap();
-            assert!(spec.web_view);
-            let payload = remote_webview_payload(&spec);
-            assert_eq!(payload["url"], "https://example.com/search?page=2");
-            assert_eq!(payload["http_method"], "POST");
-            assert_eq!(payload["headers"]["X-Page"], "2");
-            assert_eq!(payload["js_source"], script);
-            assert_eq!(payload["sourceRegex"], regex);
-            let body: serde_json::Value = serde_json::from_str(payload["body"].as_str().unwrap()).unwrap();
-            assert_eq!(body, json!({"nested": {"keyword": keyword, "page": "2"}}));
-        }
-    }
-
-    #[test]
-    fn remote_webview_http_200_exception_body_is_failure() {
-        for text in ["Error: page.goto: Could not connect: Connection refused",
-            "TimeoutError: page.goto: Timeout 15000ms exceeded.",
-            "Error: page.evaluate: Error: script failed",
-            "Error: browserType.launch: browser process exited",
-            "TypeError: Invalid URL", "Error: connect ECONNREFUSED 127.0.0.1:1"] {
-            assert!(matches!(validate_remote_webview_body(text), Err(AppError::Upstream(_))));
-        }
-        for text in ["", "<html><body></body></html>",
-            "<html><body>Error: page.goto: quoted content</body></html>",
-            "Normal script result", "Error: a book title"] {
-            assert!(validate_remote_webview_body(text).is_ok());
-        }
-    }
-
-    #[test]
-    fn remote_webview_payload_preserves_request_fields() {
-        let spec = RequestSpec {
-            url: "https://example.com/search?wd=%E5%B0%8F%E8%AF%B4".into(),
-            method: HttpMethod::POST,
-            headers: vec![("Cookie".into(), "session=private".into())],
-            body: Some("key=%E5%B0%8F%E8%AF%B4".into()),
-            web_view: true,
-            web_js: Some("document.title = 'ready'".into()),
-            source_regex: Some("<main>([\\s\\S]*)</main>".into()),
-            ..RequestSpec::default()
-        };
-
-        let payload = remote_webview_payload(&spec);
-        assert_eq!(payload["url"], spec.url);
-        assert_eq!(payload["headers"]["Cookie"], "session=private");
-        assert_eq!(payload["http_method"], "POST");
-        assert_eq!(payload["body"], "key=%E5%B0%8F%E8%AF%B4");
-        assert_eq!(payload["js_source"], "document.title = 'ready'");
-        assert_eq!(payload["sourceRegex"], "<main>([\\s\\S]*)</main>");
-    }
-
-    #[tokio::test]
-    async fn remote_webview_without_configuration_returns_actionable_error() {
-        let (service, storage_dir) = test_book_service("webview-unconfigured");
-        let spec = RequestSpec {
-            url: "https://example.com/search".into(),
-            web_view: true,
-            ..RequestSpec::default()
-        };
-
-        let result = service.fetch_remote_webview(spec).await;
-
-        let _ = tokio::fs::remove_dir_all(storage_dir).await;
-        assert!(matches!(
-            result,
-            Err(AppError::Upstream(message)) if message.contains("REMOTE_WEBVIEW_URL")
-        ));
-    }
 
     fn test_book_service(name: &str) -> (BookService, PathBuf) {
         let storage_dir = std::env::temp_dir().join(format!(
