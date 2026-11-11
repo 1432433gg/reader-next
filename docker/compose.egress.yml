@@ -1,0 +1,31 @@
+services:
+  renderer-net:
+    image: reader-next-egress:1
+    build:
+      context: ./egress
+    pull_policy: build
+    restart: unless-stopped
+    profiles: ["webview"]
+    cap_drop: ["ALL"]
+    cap_add: ["NET_ADMIN"]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      EGRESS_DENY_CIDRS: ${EGRESS_DENY_CIDRS:?Set all host public IPv4 addresses as /32 and other sensitive IPv4 CIDRs}
+      EGRESS_ALLOW_TCP: ${EGRESS_ALLOW_TCP:-}
+    networks:
+      default:
+        aliases: ["remote-webview"]
+    expose: ["8050"]
+    healthcheck:
+      test: ["CMD", "test", "-f", "/run/egress-ready"]
+      interval: 2s
+      timeout: 1s
+      retries: 10
+  remote-webview:
+    network_mode: "service:renderer-net"
+    expose: !reset []
+    depends_on:
+      renderer-net:
+        condition: service_healthy
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]

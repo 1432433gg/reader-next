@@ -1,7 +1,7 @@
 use crate::api::auth::AuthContext;
 use crate::api::AppState;
 use crate::error::error::{ApiResponse, AppError};
-use crate::model::book_source::{book_source_from_value, BookSource};
+use crate::model::book_source::{book_source_from_value, book_source_snapshot_json, BookSource};
 use crate::service::book_source_service::{
     book_source_has_group, set_invalid_book_source_group, INVALID_BOOK_SOURCE_GROUP,
 };
@@ -18,16 +18,28 @@ use axum::{
 };
 use regex::{Captures, Regex};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::HashSet,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    sync::Arc,
+};
 use tokio::{sync::Semaphore, task::JoinSet};
 use url::Url;
 
 const MAX_TEST_SOURCE_BATCH_SIZE: usize = 100;
+const MAX_REMOTE_SOURCE_PACKAGE_REDIRECTS: usize = 5;
+const MAX_REMOTE_SOURCE_PACKAGE_BYTES: usize = 5 * 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
 pub struct BookSourceUrlParam {
     #[serde(rename = "bookSourceUrl")]
     book_source_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct BookSourceListQuery {
+    exact_integers: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -45,6 +57,28 @@ pub struct TestBookSourcesRequest {
     pub keyword: Option<String>,
     pub mark_invalid: Option<bool>,
     pub concurrent: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportBookSourcesRequest {
+    pub items: Vec<ImportBookSourceItem>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportBookSourceItem {
+    pub source: BookSource,
+    pub action: ImportBookSourceAction,
+    #[serde(default)]
+    pub expected_existing: Option<BookSource>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ImportBookSourceAction {
+    Add,
+    Overwrite,
 }
 
 #[derive(Debug, Serialize)]
@@ -146,6 +180,7 @@ pub async fn get_book_source(
 pub async fn get_book_sources(
     State(state): State<AppState>,
     auth: AuthContext,
+    Query(query): Query<BookSourceListQuery>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
     let user_ns = state
         .user_service
@@ -153,9 +188,16 @@ pub async fn get_book_sources(
         .await
         .map_err(|_| AppError::BadRequest("NEED_LOGIN".to_string()))?;
     let list = state.book_source_service.list(&user_ns).await?;
-    Ok(Json(ApiResponse::ok(
-        serde_json::to_value(list).unwrap_or_default(),
-    )))
+    let data = if query.exact_integers {
+        list.iter()
+            .map(book_source_snapshot_json)
+            .collect::<Result<Vec<_>, _>>()
+            .map(serde_json::Value::Array)
+    } else {
+        serde_json::to_value(list)
+    }
+    .map_err(|error| AppError::Internal(error.into()))?;
+    Ok(Json(ApiResponse::ok(data)))
 }
 
 pub async fn get_default_book_source_owner(
@@ -252,15 +294,10 @@ pub async fn test_book_sources(
         .list(&user_ns)
         .await?
         .into_iter()
-        .filter(|source| {
-            requested
-                .as_ref()
-                .map(|urls| urls.contains(&normalize_source_url(&source.book_source_url)))
-                .unwrap_or(true)
-        })
+        .filter(|source| requested.contains(&normalize_source_url(&source.book_source_url)))
         .collect::<Vec<_>>();
 
-    let concurrent = req.concurrent.unwrap_or(12).clamp(1, 12);
+    let concurrent = req.concurrent.unwrap_or(3).clamp(1, 6);
     let keyword = req.keyword.clone();
     let mark_invalid = req.mark_invalid.unwrap_or(true);
     let outcomes = test_sources_in_parallel(
@@ -322,22 +359,92 @@ pub async fn test_book_sources(
 
 fn normalize_requested_source_urls(
     urls: Option<&[String]>,
-) -> Result<Option<HashSet<String>>, AppError> {
-    let Some(urls) = urls else {
-        return Ok(None);
-    };
+) -> Result<HashSet<String>, AppError> {
+    let urls = urls.ok_or_else(|| AppError::BadRequest("bookSourceUrls required".to_string()))?;
+    if urls.is_empty() {
+        return Err(AppError::BadRequest("至少明确选择一个书源".to_string()));
+    }
     if urls.len() > MAX_TEST_SOURCE_BATCH_SIZE {
         return Err(AppError::BadRequest(format!(
             "bookSourceUrls 最多支持 {} 条",
             MAX_TEST_SOURCE_BATCH_SIZE
         )));
     }
-    Ok(Some(
-        urls.iter()
-            .map(|url| normalize_source_url(url))
-            .filter(|url| !url.is_empty())
-            .collect::<HashSet<_>>(),
-    ))
+    let normalized = urls
+        .iter()
+        .map(|url| normalize_source_url(url))
+        .filter(|url| !url.is_empty())
+        .collect::<HashSet<_>>();
+    if normalized.is_empty() {
+        return Err(AppError::BadRequest("bookSourceUrls 不能为空".to_string()));
+    }
+    Ok(normalized)
+}
+
+pub async fn import_book_sources(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Json(req): Json<ImportBookSourcesRequest>,
+) -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
+    let user_ns = state
+        .user_service
+        .resolve_user_ns_with_override(auth.access_token(), auth.secure_key(), auth.user_ns())
+        .await
+        .map_err(|_| AppError::BadRequest("NEED_LOGIN".to_string()))?;
+    if req.items.is_empty() {
+        return Err(AppError::BadRequest("没有选择可导入的书源".to_string()));
+    }
+
+    let mut items = Vec::with_capacity(req.items.len());
+    for item in req.items {
+        let source = item.source;
+        if source.book_source_name.trim().is_empty() || source.book_source_url.trim().is_empty() {
+            return Err(AppError::BadRequest("书源名称和地址不能为空".to_string()));
+        }
+        if source.book_source_type.unwrap_or(0) != 0 {
+            return Err(AppError::BadRequest("仅支持文字书源导入".to_string()));
+        }
+        let parsed = Url::parse(&source.book_source_url)
+            .map_err(|_| AppError::BadRequest("书源地址格式无效".to_string()))?;
+        if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+            return Err(AppError::BadRequest("书源地址必须使用 HTTP 或 HTTPS".to_string()));
+        }
+
+        let expected_existing = match item.action {
+            ImportBookSourceAction::Add => {
+                if item.expected_existing.is_some() {
+                    return Err(AppError::BadRequest(
+                        "新增书源不能携带现有书源快照".to_string(),
+                    ));
+                }
+                None
+            }
+            ImportBookSourceAction::Overwrite => {
+                let expected = item.expected_existing.ok_or_else(|| {
+                    AppError::BadRequest("覆盖书源必须携带预览时的现有版本".to_string())
+                })?;
+                if normalize_source_url(&expected.book_source_url)
+                    != normalize_source_url(&source.book_source_url)
+                {
+                    return Err(AppError::BadRequest(
+                        "覆盖书源地址与预览快照不一致".to_string(),
+                    ));
+                }
+                Some(expected)
+            }
+        };
+        items.push((source, expected_existing));
+    }
+
+    let (added, overwritten) = state
+        .book_source_service
+        .import_selected(&user_ns, items)
+        .await?;
+    Ok(Json(ApiResponse::ok(serde_json::json!({
+        "added": added,
+        "overwritten": overwritten,
+        "saved": added + overwritten,
+    }))))
 }
 
 async fn test_sources_in_parallel(
@@ -1073,6 +1180,220 @@ pub async fn read_remote_source_file(
     Ok(Json(ApiResponse::ok(vec![json_str])))
 }
 
+pub async fn read_remote_source_package(
+    State(state): State<AppState>,
+    auth: AuthContext,
+    Json(param): Json<RemoteSourceParam>,
+) -> Result<Json<ApiResponse<String>>, AppError> {
+    let _user_ns = state
+        .user_service
+        .resolve_user_ns_with_override(auth.access_token(), auth.secure_key(), auth.user_ns())
+        .await
+        .map_err(|_| AppError::BadRequest("NEED_LOGIN".to_string()))?;
+
+    let text = fetch_remote_source_package(&param.url).await?;
+    Ok(Json(ApiResponse::ok(text)))
+}
+
+async fn fetch_remote_source_package(raw_url: &str) -> Result<String, AppError> {
+    let mut current = Url::parse(raw_url)
+        .map_err(|_| AppError::BadRequest("远程书源地址格式无效".to_string()))?;
+
+    for redirect_count in 0..=MAX_REMOTE_SOURCE_PACKAGE_REDIRECTS {
+        let resolved = resolve_remote_package_target(&current).await?;
+        let mut builder = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+        if let Some(addresses) = resolved {
+            let host = current
+                .host_str()
+                .ok_or_else(|| AppError::BadRequest("远程书源地址缺少主机名".to_string()))?;
+            builder = builder.resolve_to_addrs(host, &addresses);
+        }
+        let client = builder
+            .build()
+            .map_err(|error| AppError::Internal(error.into()))?;
+        let mut response = client
+            .get(current.clone())
+            .send()
+            .await
+            .map_err(|_| AppError::BadRequest("远程书源请求失败".to_string()))?;
+
+        if response.status().is_redirection() {
+            if redirect_count == MAX_REMOTE_SOURCE_PACKAGE_REDIRECTS {
+                return Err(AppError::BadRequest("远程书源重定向次数过多".to_string()));
+            }
+            let location = response
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .ok_or_else(|| AppError::BadRequest("远程书源重定向地址无效".to_string()))?;
+            let next = current
+                .join(location)
+                .map_err(|_| AppError::BadRequest("远程书源重定向地址无效".to_string()))?;
+            if current.scheme() == "https" && next.scheme() != "https" {
+                return Err(AppError::BadRequest("不允许 HTTPS 降级重定向".to_string()));
+            }
+            current = next;
+            continue;
+        }
+
+        if !response.status().is_success() {
+            return Err(AppError::BadRequest("远程书源返回错误状态".to_string()));
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_REMOTE_SOURCE_PACKAGE_BYTES as u64)
+        {
+            return Err(AppError::BadRequest("远程书源包超过 5 MiB 限制".to_string()));
+        }
+
+        let mut body = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|_| AppError::BadRequest("读取远程书源失败".to_string()))?
+        {
+            if body.len().saturating_add(chunk.len()) > MAX_REMOTE_SOURCE_PACKAGE_BYTES {
+                return Err(AppError::BadRequest("远程书源包超过 5 MiB 限制".to_string()));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        let text = String::from_utf8(body)
+            .map_err(|_| AppError::BadRequest("远程书源包不是有效 UTF-8 文本".to_string()))?;
+        if !is_source_package_document(&text) {
+            return Err(AppError::BadRequest("远程响应不是受支持的书源 JSON 包".to_string()));
+        }
+        return Ok(text);
+    }
+
+    Err(AppError::BadRequest("远程书源重定向次数过多".to_string()))
+}
+
+async fn resolve_remote_package_target(url: &Url) -> Result<Option<Vec<SocketAddr>>, AppError> {
+    validate_remote_package_url(url)?;
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| AppError::BadRequest("远程书源地址端口无效".to_string()))?;
+    match url
+        .host()
+        .ok_or_else(|| AppError::BadRequest("远程书源地址缺少主机名".to_string()))?
+    {
+        url::Host::Domain(domain) => {
+            let addresses = tokio::net::lookup_host((domain, port))
+                .await
+                .map_err(|_| AppError::BadRequest("远程书源主机无法解析".to_string()))?
+                .filter(|address| is_public_ip(address.ip()))
+                .collect::<Vec<_>>();
+            if addresses.is_empty() {
+                return Err(AppError::BadRequest("远程书源主机未解析到公网地址".to_string()));
+            }
+            Ok(Some(addresses))
+        }
+        url::Host::Ipv4(address) => {
+            if is_public_ip(IpAddr::V4(address)) {
+                Ok(None)
+            } else {
+                Err(AppError::BadRequest("不允许访问本地或保留网络地址".to_string()))
+            }
+        }
+        url::Host::Ipv6(address) => {
+            if is_public_ip(IpAddr::V6(address)) {
+                Ok(None)
+            } else {
+                Err(AppError::BadRequest("不允许访问本地或保留网络地址".to_string()))
+            }
+        }
+    }
+}
+
+fn validate_remote_package_url(url: &Url) -> Result<(), AppError> {
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return Err(AppError::BadRequest("远程书源地址必须使用 HTTP 或 HTTPS".to_string()));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(AppError::BadRequest("远程书源地址不能包含用户凭据".to_string()));
+    }
+    match url.host().expect("host checked above") {
+        url::Host::Domain(domain) if is_non_public_domain(domain) => {
+            Err(AppError::BadRequest("不允许访问本地或保留网络地址".to_string()))
+        }
+        url::Host::Ipv4(address) if !is_public_ipv4(address) => {
+            Err(AppError::BadRequest("不允许访问本地或保留网络地址".to_string()))
+        }
+        url::Host::Ipv6(address) if !is_public_ipv6(address) => {
+            Err(AppError::BadRequest("不允许访问本地或保留网络地址".to_string()))
+        }
+        _ => Ok(()),
+    }
+}
+
+fn is_non_public_domain(domain: &str) -> bool {
+    let domain = domain.trim_end_matches('.').to_ascii_lowercase();
+    !domain.contains('.')
+        || ["localhost", "local", "internal", "lan", "home", "test", "invalid", "example"]
+            .iter()
+            .any(|suffix| domain == *suffix || domain.ends_with(&format!(".{suffix}")))
+}
+
+fn is_public_ip(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => is_public_ipv4(address),
+        IpAddr::V6(address) => address
+            .to_ipv4_mapped()
+            .map(is_public_ipv4)
+            .unwrap_or_else(|| is_public_ipv6(address)),
+    }
+}
+
+fn is_public_ipv4(address: Ipv4Addr) -> bool {
+    let octets = address.octets();
+    !(address.is_private()
+        || address.is_loopback()
+        || address.is_link_local()
+        || address.is_broadcast()
+        || address.is_unspecified()
+        || address.is_multicast()
+        || octets[0] == 0
+        || (octets[0] == 100 && octets[1] & 0xc0 == 0x40)
+        || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0)
+        || (octets[0] == 192 && octets[1] == 0 && octets[2] == 2)
+        || (octets[0] == 192 && octets[1] == 88 && octets[2] == 99)
+        || (octets[0] == 198 && matches!(octets[1], 18 | 19))
+        || (octets[0] == 198 && octets[1] == 51 && octets[2] == 100)
+        || (octets[0] == 203 && octets[1] == 0 && octets[2] == 113)
+        || octets[0] >= 240)
+}
+
+fn is_public_ipv6(address: Ipv6Addr) -> bool {
+    let segments = address.segments();
+    let global_unicast = (segments[0] & 0xe000) == 0x2000;
+    let reserved_2001 = segments[0] == 0x2001
+        && ((segments[1] & 0xfe00) == 0
+            || segments[1] == 0x0db8
+            || (segments[1] == 0x0020 && (segments[2] & 0xfff0) == 0));
+    let documentation_range = segments[0] == 0x3fff && (segments[1] & 0xf000) == 0;
+    global_unicast && !reserved_2001 && !documentation_range && segments[0] != 0x2002
+}
+
+fn is_source_package_document(text: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return false;
+    };
+    match value {
+        serde_json::Value::Array(_) => true,
+        serde_json::Value::Object(object) => {
+            ["bookSourceList", "bookSources", "data", "sources"]
+                .iter()
+                .any(|key| object.get(*key).is_some_and(serde_json::Value::is_array))
+                || (object.contains_key("bookSourceName") && object.contains_key("bookSourceUrl"))
+        }
+        _ => false,
+    }
+}
+
 use axum::extract::Multipart;
 
 pub async fn read_source_file(
@@ -1140,5 +1461,52 @@ mod tests {
         let err = normalize_requested_source_urls(Some(&urls)).unwrap_err();
 
         assert!(matches!(err, AppError::BadRequest(message) if message.contains("100")));
+    }
+
+    #[test]
+    fn requested_source_urls_reject_missing_and_empty_targets() {
+        assert!(matches!(
+            normalize_requested_source_urls(None),
+            Err(AppError::BadRequest(_))
+        ));
+        let empty: [String; 0] = [];
+        assert!(matches!(
+            normalize_requested_source_urls(Some(&empty)),
+            Err(AppError::BadRequest(_))
+        ));
+        let blank = [" \t".to_string()];
+        assert!(matches!(
+            normalize_requested_source_urls(Some(&blank)),
+            Err(AppError::BadRequest(_))
+        ));
+    }
+
+    #[test]
+    fn remote_source_preview_rejects_local_hosts_and_non_http_schemes() {
+        for raw in [
+            "http://localhost/sources.json",
+            "http://printer.local/sources.json",
+            "http://10.1.2.3/sources.json",
+            "http://100.64.0.1/sources.json",
+            "http://169.254.169.254/latest/meta-data",
+            "http://[::1]/sources.json",
+            "http://[3fff:10::1]/sources.json",
+            "ftp://example.com/sources.json",
+            "https://user:secret@example.com/sources.json",
+        ] {
+            let url = Url::parse(raw).unwrap();
+            assert!(validate_remote_package_url(&url).is_err(), "accepted {raw}");
+        }
+        assert!(is_public_ip("1.1.1.1".parse().unwrap()));
+        assert!(is_public_ip("2606:4700:4700::1111".parse().unwrap()));
+    }
+
+    #[test]
+    fn remote_source_preview_only_returns_json_source_package_shapes() {
+        assert!(is_source_package_document(r#"[{"bookSourceName":"A","bookSourceUrl":"https://a.example"}]"#));
+        assert!(is_source_package_document(r#"{"bookSources":[{"bookSourceName":"A"}]}"#));
+        assert!(is_source_package_document(r#"{"bookSourceName":"A","bookSourceUrl":"https://a.example"}"#));
+        assert!(!is_source_package_document("private internal response"));
+        assert!(!is_source_package_document(r#"{"secret":"value"}"#));
     }
 }

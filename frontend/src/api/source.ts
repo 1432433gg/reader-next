@@ -2,8 +2,23 @@ import http from './http'
 import type { BookSource, BookSourceTestResponse } from '../types'
 import { MAX_SOURCE_TEST_BATCH_SIZE } from '../utils/sourceTesting'
 
-export function getBookSources() {
-  return http.get<BookSource[]>('/getBookSources').then((r) => r.data)
+export const DEFAULT_SOURCE_TEST_CONCURRENCY = 3
+export const MAX_SOURCE_TEST_CONCURRENCY = 6
+
+export type BookSourceImportItem = {
+  source: BookSource
+  action: 'add' | 'overwrite'
+  expectedExisting?: BookSource
+}
+
+export type BookSourceImportResult = {
+  added: number
+  overwritten: number
+  saved: number
+}
+
+export function getBookSources(options: { exactIntegers?: boolean } = {}) {
+  return http.get<BookSource[]>('/getBookSources', { params: options }).then((r) => r.data)
 }
 
 export function getDefaultBookSourceOwner() {
@@ -54,7 +69,15 @@ export function testBookSources(params: {
   if ((params.bookSourceUrls?.length || 0) > MAX_SOURCE_TEST_BATCH_SIZE) {
     throw new Error(`单次最多测试 ${MAX_SOURCE_TEST_BATCH_SIZE} 个书源`)
   }
+  if (params.concurrent !== undefined &&
+    (!Number.isInteger(params.concurrent) || params.concurrent < 1 || params.concurrent > MAX_SOURCE_TEST_CONCURRENCY)) {
+    throw new Error(`手动检测并发数必须为 1–${MAX_SOURCE_TEST_CONCURRENCY}`)
+  }
   return http.post<BookSourceTestResponse>('/testBookSources', params).then((r) => r.data)
+}
+
+export function importBookSources(items: BookSourceImportItem[]) {
+  return http.post<BookSourceImportResult>('/importBookSources', { items }).then((r) => r.data)
 }
 
 export function deleteInvalidBookSources() {
@@ -67,6 +90,10 @@ export function setAsDefaultBookSources(username: string) {
 
 export function readRemoteSourceFile(url: string) {
   return http.post<string[]>('/readRemoteSourceFile', { url }).then((r) => r.data)
+}
+
+export function readRemoteSourcePackage(url: string) {
+  return http.post<string>('/readRemoteSourcePackage', { url }).then((r) => r.data)
 }
 
 export function readSourceFile(file: File) {

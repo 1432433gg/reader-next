@@ -53,6 +53,28 @@ Runtime contract:
 - Default database URL: `sqlite:/app/storage/reader.db?mode=rwc`.
 - Secrets stay in `.env.docker`; never bake `SECURE_KEY` or `INVITE_CODE` into the image.
 
+## Optional Remote WebView
+
+Most sources use the regular HTTP client. Sources whose parsed request rule sets `webView` use the renderer configured by `REMOTE_WEBVIEW_URL`; if no renderer is configured, those requests return a clear error and do not fall back to HTTP.
+
+To run the optional renderer in the same Compose network, set this in `.env.docker`:
+
+```dotenv
+REMOTE_WEBVIEW_URL=http://remote-webview:8050
+```
+
+The profile builds the bundled POST compatibility repair from the pinned upstream 3.2.0 digest. It preserves caller Content-Type and UTF-8 body bytes, and handles an empty POST response without a second GET. Rebuild after updating the bundled renderer files.
+
+For production, configure the host-address deny list and use the isolated profile described in [renderer egress isolation](../../docker/egress/README.md). Build and start it with both Compose files:
+
+```bash
+docker compose -f docker/compose.yml -f docker/compose.egress.yml --profile webview up -d --build
+```
+
+The bundled renderer serializes browser tasks through browser shutdown, uses a 15-second whole-request deadline (including queue time), and cancels work when the caller disconnects. This keeps a timed-out task from leaving a browser running alongside the next task. Each renderer process runs at most one browser task; higher Reader-side concurrency can queue at the renderer.
+
+The renderer is reachable by the Reader container on the Compose network and has no host port mapping. The supplied egress override filters renderer connections at the network-namespace firewall, including redirects and secondary requests. Follow its host public-address configuration, trusted-service exception rules, IPv4 scope and controlled verification steps. The Reader service has a separate namespace and can receive its own ordinary-HTTP egress policy as required by the deployment.
+
 ## Local dual-db workflow
 
 If you want an always-on local container for day-to-day reading while keeping development writes isolated, run:

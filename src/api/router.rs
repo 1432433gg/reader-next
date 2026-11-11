@@ -55,6 +55,10 @@ pub fn build_router(state: AppState) -> Router {
             post(handlers::save_book_sources),
         )
         .route(
+            "/reader3/importBookSources",
+            post(handlers::import_book_sources),
+        )
+        .route(
             "/reader3/deleteBookSource",
             post(handlers::delete_book_source),
         )
@@ -73,6 +77,10 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/reader3/readRemoteSourceFile",
             post(handlers::read_remote_source_file),
+        )
+        .route(
+            "/reader3/readRemoteSourcePackage",
+            post(handlers::read_remote_source_package),
         )
         .route("/reader3/readSourceFile", post(handlers::read_source_file))
         .route(

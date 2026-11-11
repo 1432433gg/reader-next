@@ -57,6 +57,22 @@ pub struct ExploreKind {
     pub style: Option<Value>,
 }
 
+/// Keep values outside JavaScript's safe integer range exact on the import
+/// client's read/overwrite round trip. The normal list uses numeric JSON.
+pub(crate) fn book_source_snapshot_json(source: &BookSource) -> serde_json::Result<Value> {
+    const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
+    let mut json = serde_json::to_value(source)?;
+    for (field, value) in [
+        ("lastUpdateTime", source.last_update_time),
+        ("respondTime", source.respond_time),
+    ] {
+        if let Some(value) = value.filter(|value| !(-MAX_SAFE_INTEGER..=MAX_SAFE_INTEGER).contains(value)) {
+            json[field] = Value::String(value.to_string());
+        }
+    }
+    Ok(json)
+}
+
 fn deserialize_rule_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
     D: Deserializer<'de>,
@@ -130,12 +146,19 @@ pub fn migrate_legacy_book_source_value(mut value: Value) -> Value {
     move_if_absent(obj, "enable", "enabled");
 
     if let Some(Value::String(kind)) = obj.get("bookSourceType").cloned() {
-        let mapped = if kind.eq_ignore_ascii_case("AUDIO") {
-            1
+        let mapped = if kind.eq_ignore_ascii_case("AUDIO") || kind.trim() == "1" {
+            Some(1)
+        } else if kind.eq_ignore_ascii_case("TEXT")
+            || kind.eq_ignore_ascii_case("BOOK")
+            || kind.trim() == "0"
+        {
+            Some(0)
         } else {
-            0
+            None
         };
-        obj.insert("bookSourceType".to_string(), json!(mapped));
+        if let Some(mapped) = mapped {
+            obj.insert("bookSourceType".to_string(), json!(mapped));
+        }
     }
 
     if !obj.contains_key("header") {
@@ -248,11 +271,23 @@ fn move_if_absent(obj: &mut Map<String, Value>, old: &str, new: &str) {
 }
 
 fn migrate_rule_object(obj: &mut Map<String, Value>, target: &str, fields: &[(&str, &str)]) {
-    let mut target_obj = obj
-        .get(target)
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
+    let mut target_obj = match obj.get(target) {
+        Some(Value::Object(value)) => value.clone(),
+        Some(Value::String(raw)) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
+                Map::new()
+            } else {
+                match serde_json::from_str::<Value>(trimmed) {
+                    Ok(Value::Object(value)) => value,
+                    // Keep malformed or non-object strings so deserialization reports
+                    // the invalid rule instead of replacing it with a partial migration.
+                    _ => return,
+                }
+            }
+        }
+        _ => Map::new(),
+    };
     for (old, new) in fields {
         if target_obj.contains_key(*new) {
             continue;
@@ -269,7 +304,8 @@ fn migrate_rule_object(obj: &mut Map<String, Value>, target: &str, fields: &[(&s
 }
 
 fn convert_legacy_url_rule(raw: &str) -> String {
-    let mut url = raw.to_string();
+    let (url_part, modern_options) = crate::crawler::url_analyzer::split_url_options(raw);
+    let mut url = url_part.to_string();
     let mut option = Map::new();
 
     if let Some((start, end, header)) = extract_legacy_header(&url) {
@@ -304,11 +340,21 @@ fn convert_legacy_url_rule(raw: &str) -> String {
         .replace("searchPage", "{{page}}");
     url = convert_legacy_page_braces(&url);
 
-    if option.is_empty() {
-        url
-    } else {
-        format!("{},{}", url, Value::Object(option))
+    if let Some(modern_options) = modern_options {
+        if option.is_empty() {
+            // Preserve the original separator, spacing and options verbatim.
+            url.push_str(&raw[url_part.len()..]);
+            return url;
+        }
+        if let Ok(Value::Object(modern)) = crate::crawler::url_analyzer::parse_url_options(modern_options) {
+            option.extend(modern);
+        }
     }
+    if !option.is_empty() {
+        url.push(',');
+        url.push_str(&Value::Object(option).to_string());
+    }
+    url
 }
 
 fn extract_legacy_header(input: &str) -> Option<(usize, usize, String)> {
@@ -339,5 +385,55 @@ fn extract_legacy_header(input: &str) -> Option<(usize, usize, String)> {
 
 fn convert_legacy_page_braces(input: &str) -> String {
     let re = regex::Regex::new(r"\{([^{}]*,[^{}]*)\}").unwrap();
-    re.replace_all(input, "<$1>").into_owned()
+    re.replace_all(input, "<${1}>").into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_flat_rules_and_string_rule_objects_are_migrated() {
+        let source = book_source_from_value(json!({
+            "bookSourceName": "Legacy",
+            "bookSourceUrl": "https://example.com",
+            "bookSourceType": "TEXT",
+            "ruleSearch": "{\"bookList\":\".book\"}",
+            "ruleSearchName": ".title"
+        }))
+        .unwrap();
+
+        assert_eq!(source.book_source_type, Some(0));
+        let rule = source.rule_search.unwrap();
+        assert_eq!(rule.book_list.as_deref(), Some(".book"));
+        assert_eq!(rule.name.as_deref(), Some(".title"));
+    }
+
+    #[test]
+    fn unknown_legacy_source_type_is_not_migrated_to_text() {
+        let result = book_source_from_value(json!({
+            "bookSourceName": "Unknown",
+            "bookSourceUrl": "https://example.com",
+            "bookSourceType": "mystery"
+        }));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn migration_preserves_json_request_options_and_converts_legacy_page_braces() {
+        let options = r#"https://example.com/search,{"webView":true,"webJs":"return true"}"#;
+        let migrated = book_source_from_value(json!({
+            "bookSourceName": "WebView",
+            "bookSourceUrl": "https://example.com",
+            "searchUrl": options
+        }))
+        .unwrap();
+
+        assert_eq!(migrated.search_url.as_deref(), Some(options));
+        assert_eq!(
+            convert_legacy_page_braces("https://example.com/search?page={page, 1}"),
+            "https://example.com/search?page=<page, 1>"
+        );
+    }
 }

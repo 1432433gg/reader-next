@@ -25,15 +25,17 @@ pub fn analyze_url(
 ) -> Result<RequestSpec, AppError> {
     with_js_lib(source.js_lib.as_deref(), || {
         let base_url = strip_url_options(&normalize_source_url(base_url)).to_string();
-        let mut rule_url = m_url.to_string();
+        let (url_rule, explicit_options) = split_url_options(m_url);
         let mut header_spec = source_header_spec(source)?;
 
-        rule_url = eval_url_js_segments(&rule_url, key, page, &source.book_source_url, &base_url)?;
-        rule_url = replace_inline_js(&rule_url, key, page, &source.book_source_url, &base_url)?;
-        rule_url = replace_legacy_placeholders(&rule_url, key, page);
-        rule_url = replace_page_choices(&rule_url, page);
-
-        let (url_part, options) = split_url_options(&rule_url);
+        let evaluated =
+            eval_url_js_segments(url_rule, key, page, &source.book_source_url, &base_url)?;
+        let (url_rule, generated_options) = split_url_options(&evaluated);
+        let expanded = replace_inline_js(url_rule, key, page, &source.book_source_url, &base_url)?;
+        let (url_rule, inline_options) = split_url_options(&expanded);
+        let options = explicit_options.or(generated_options).or(inline_options);
+        let url_part =
+            replace_page_choices(&replace_legacy_placeholders(url_rule, key, page), page);
         let mut url = absolute_url(&base_url, url_part.trim());
         let mut method = HttpMethod::GET;
         let mut body = None;
@@ -44,9 +46,31 @@ pub fn analyze_url(
         let mut web_view = false;
         let mut web_js = None;
         let mut web_view_delay_time = 0u64;
+        let mut source_regex = None;
 
         if let Some(options) = options {
-            let options = parse_url_options(options)?;
+            let mut options = parse_url_options(options)?;
+            let expand = |template: &str| {
+                expand_request_value(template, key, page, &source.book_source_url, &base_url)
+            };
+            // Preserve executable scripts and regexes verbatim while expanding
+            // the scalar transport options supported by the legacy request path.
+            for field in [
+                "method",
+                "charset",
+                "retry",
+                "type",
+                "serverID",
+                "serverId",
+                "webView",
+                "webViewDelayTime",
+            ] {
+                if let Some(value) = options.get_mut(field) {
+                    if let Some(template) = value.as_str() {
+                        *value = Value::String(expand(template)?);
+                    }
+                }
+            }
             if let Some(raw_method) = options.get("method").and_then(Value::as_str) {
                 if raw_method.eq_ignore_ascii_case("POST") {
                     method = HttpMethod::POST;
@@ -58,14 +82,14 @@ pub fn analyze_url(
                 }
             }
             if let Some(value) = options.get("headers") {
-                let extra = headers_from_value(value)?;
+                let mut extra = headers_from_value(value)?;
+                for (_, value) in &mut extra {
+                    *value = expand(value)?;
+                }
                 merge_headers(&mut header_spec, extra);
             }
             if let Some(value) = options.get("body") {
-                body = Some(match value {
-                    Value::String(value) => value.clone(),
-                    other => other.to_string(),
-                });
+                body = Some(expand_request_body(value, &expand)?);
             }
             if let Some(value) = options.get("retry") {
                 retry = parse_usize(value).unwrap_or(0);
@@ -86,6 +110,11 @@ pub fn analyze_url(
             }
             if let Some(value) = options.get("webViewDelayTime") {
                 web_view_delay_time = parse_i64(value).unwrap_or(0).max(0) as u64;
+            }
+            if let Some(value) = options.get("sourceRegex").and_then(Value::as_str) {
+                if !value.trim().is_empty() {
+                    source_regex = Some(value.to_string());
+                }
             }
             if let Some(script) = options.get("js").and_then(Value::as_str) {
                 if !script.trim().is_empty() {
@@ -119,11 +148,12 @@ pub fn analyze_url(
             web_view,
             web_js,
             web_view_delay_time,
+            source_regex,
         })
     })
 }
 
-fn parse_url_options(options: &str) -> Result<Value, AppError> {
+pub(crate) fn parse_url_options(options: &str) -> Result<Value, AppError> {
     let trimmed = options.trim();
     serde_json::from_str::<Value>(trimmed)
         .or_else(|_| serde_json::from_str::<Value>(&escape_control_chars_in_json_strings(trimmed)))
@@ -374,6 +404,81 @@ fn replace_legacy_placeholders(rule: &str, key: &str, page: i32) -> String {
         .replace("searchPage", &page.to_string())
 }
 
+fn expand_request_value(
+    template: &str,
+    key: &str,
+    page: i32,
+    source_key: &str,
+    base_url: &str,
+) -> Result<String, AppError> {
+    static TOKENS: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    let tokens = TOKENS.get_or_init(|| {
+        Regex::new(r"\{\{([\w\W]*?)\}\}|\{key\}|\{page\}|\b(?:searchKey|searchPage)\b").unwrap()
+    });
+    let mut expanded = String::with_capacity(template.len());
+    let mut end = 0;
+    for capture in tokens.captures_iter(template) {
+        let token = capture.get(0).unwrap();
+        expanded.push_str(&template[end..token.start()]);
+        match token.as_str() {
+            "{key}" | "searchKey" => expanded.push_str(key),
+            "{page}" | "searchPage" => expanded.push_str(&page.to_string()),
+            _ => {
+                let script = capture.get(1).unwrap().as_str();
+                expanded.push_str(
+                    &eval_js_url(script, "", key, page, source_key, base_url)
+                        .map_err(AppError::Internal)?,
+                );
+            }
+        }
+        end = token.end();
+    }
+    expanded.push_str(&template[end..]);
+    Ok(expanded)
+}
+
+fn expand_request_body(
+    body: &Value,
+    expand: &impl Fn(&str) -> Result<String, AppError>,
+) -> Result<String, AppError> {
+    if let Value::String(raw) = body {
+        if let Ok(original @ (Value::Object(_) | Value::Array(_))) = serde_json::from_str(raw) {
+            let mut expanded = original.clone();
+            expand_body_values(&mut expanded, expand)?;
+            return Ok(if expanded == original {
+                raw.clone()
+            } else {
+                expanded.to_string()
+            });
+        }
+        return expand(raw);
+    }
+    let mut body = body.clone();
+    expand_body_values(&mut body, expand)?;
+    Ok(body.to_string())
+}
+
+fn expand_body_values(
+    value: &mut Value,
+    expand: &impl Fn(&str) -> Result<String, AppError>,
+) -> Result<(), AppError> {
+    match value {
+        Value::String(text) => *text = expand(text)?,
+        Value::Array(items) => {
+            for item in items {
+                expand_body_values(item, expand)?;
+            }
+        }
+        Value::Object(fields) => {
+            for value in fields.values_mut() {
+                expand_body_values(value, expand)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn replace_page_choices(rule: &str, page: i32) -> String {
     let re = Regex::new(r"<(.*?)>").unwrap();
     re.replace_all(rule, |captures: &regex::Captures| {
@@ -398,7 +503,7 @@ fn replace_page_choices(rule: &str, page: i32) -> String {
     .into_owned()
 }
 
-fn split_url_options(rule: &str) -> (&str, Option<&str>) {
+pub(crate) fn split_url_options(rule: &str) -> (&str, Option<&str>) {
     for (idx, ch) in rule.char_indices() {
         if ch != ',' {
             continue;
@@ -406,11 +511,39 @@ fn split_url_options(rule: &str) -> (&str, Option<&str>) {
         let after = &rule[idx + ch.len_utf8()..];
         let trimmed = after.trim_start();
         if trimmed.starts_with('{') {
-            let option_start = rule.len() - trimmed.len();
-            return (rule[..idx].trim_end(), Some(&rule[option_start..]));
+            if parse_url_options(trimmed)
+                .map(|value| is_request_options(&value))
+                .unwrap_or(false)
+            {
+                let option_start = rule.len() - trimmed.len();
+                return (rule[..idx].trim_end(), Some(&rule[option_start..]));
+            }
         }
     }
     (rule, None)
+}
+
+fn is_request_options(value: &Value) -> bool {
+    let Some(options) = value.as_object() else {
+        return false;
+    };
+    [
+        "method",
+        "charset",
+        "headers",
+        "body",
+        "retry",
+        "type",
+        "serverID",
+        "serverId",
+        "webView",
+        "webJs",
+        "webViewDelayTime",
+        "sourceRegex",
+        "js",
+    ]
+    .iter()
+    .any(|key| options.contains_key(*key))
 }
 
 fn strip_url_options(rule: &str) -> &str {
@@ -664,4 +797,92 @@ fn parse_header_token(chars: &[char], index: &mut usize, stop_at_colon: bool) ->
         .collect::<String>()
         .trim()
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::book_source::book_source_from_value;
+    use serde_json::json;
+
+    #[test]
+    fn expands_transport_templates_without_expanding_scripts() {
+        let source = BookSource::default();
+        let script = "const literal = '{{false}}'; return literal;";
+        for (page, expected_post) in [(1, false), (2, true)] {
+            let options = json!({
+                "method": "{{page > 1 ? 'POST' : 'GET'}}",
+                "webView": "{{false}}",
+                "body": "key={key}",
+                "webJs": script,
+                "sourceRegex": "{{literal}}"
+            });
+            let request = analyze_url(
+                &format!("https://reader.example/query,{options}"),
+                "keyword",
+                page,
+                "https://reader.example",
+                &source,
+            )
+            .unwrap();
+            assert_eq!(matches!(request.method, HttpMethod::POST), expected_post);
+            assert!(!request.web_view);
+            assert_eq!(request.body.as_deref(), Some("key=keyword"));
+            assert_eq!(request.web_js.as_deref(), Some(script));
+            assert_eq!(request.source_regex.as_deref(), Some("{{literal}}"));
+        }
+    }
+
+    #[test]
+    fn parses_remote_webview_source_regex_and_javascript() {
+        let source = BookSource {
+            book_source_name: "WebView source".to_string(),
+            book_source_url: "https://example.com".to_string(),
+            ..BookSource::default()
+        };
+        let request = analyze_url(
+            r#"https://example.com/list,{"webView":true,"sourceRegex":"<main>.*</main>","webJs":"return true"}"#,
+            "",
+            1,
+            "https://example.com",
+            &source,
+        )
+        .unwrap();
+
+        assert!(request.web_view);
+        assert_eq!(request.source_regex.as_deref(), Some("<main>.*</main>"));
+        assert_eq!(request.web_js.as_deref(), Some("return true"));
+    }
+
+    #[test]
+    fn stored_source_keeps_webview_options_after_legacy_migration() {
+        let script = r#"const config = {"left":1,"right":2}; document.title = config.left;"#;
+        let body = r#"{"nested":{"left":"@body","right":"<literal>"}}"#;
+        let options = json!({
+            "webView": true, "webJs": script, "method": "POST",
+            "headers": {"Content-Type": "application/json"}, "body": body
+        });
+        let source = book_source_from_value(json!({
+            "bookSourceName": "Stored WebView source",
+            "bookSourceUrl": "https://example.com",
+            "searchUrl": format!("https://example.com/search?page={{1,2}}, {options}")
+        }))
+        .unwrap();
+        assert_eq!(
+            source.search_url.as_deref(),
+            Some(format!("https://example.com/search?page=<1,2>, {options}").as_str())
+        );
+        let request = analyze_url(
+            source.search_url.as_deref().unwrap(),
+            "keyword",
+            1,
+            &source.book_source_url,
+            &source,
+        )
+        .unwrap();
+
+        assert!(request.web_view);
+        assert_eq!(request.web_js.as_deref(), Some(script));
+        assert_eq!(request.body.as_deref(), Some(body));
+    }
 }

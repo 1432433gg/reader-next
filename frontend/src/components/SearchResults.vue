@@ -208,7 +208,7 @@ function doSearch(key: string) {
 
   eventSource = searchBookMultiSSE({
     key,
-    concurrentCount: 24,
+    concurrentCount: 4,
     bookSourceGroup: searchScope.value === 'group' ? selectedGroup.value : undefined,
     bookSourceUrl: searchScope.value === 'source' ? selectedSourceUrl.value : undefined,
   })

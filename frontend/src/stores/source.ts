@@ -13,7 +13,7 @@ export const useSourceStore = defineStore('source', () => {
     if (loaded.value && !options.force) return
     if (loadingTask) return loadingTask
     loading.value = true
-    loadingTask = getBookSources()
+    loadingTask = getBookSources({ exactIntegers: true })
       .then((list) => {
         sources.value = list
         loaded.value = true

@@ -37,6 +37,14 @@ impl BookSourceService {
         Ok(())
     }
 
+    pub async fn import_selected(
+        &self,
+        user_ns: &str,
+        items: Vec<(BookSource, Option<BookSource>)>,
+    ) -> Result<(usize, usize), AppError> {
+        self.repo.import_selected(user_ns, items).await
+    }
+
     pub async fn get(
         &self,
         user_ns: &str,

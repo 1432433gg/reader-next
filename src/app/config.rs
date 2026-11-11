@@ -19,6 +19,8 @@ pub struct AppConfig {
     pub chapter_update_interval_hours: u64,
     /// 自动检查时同时请求的书源数量
     pub chapter_update_concurrency: usize,
+    /// Remote WebView service base URL. Empty disables renderer fetches.
+    pub remote_webview_url: String,
 }
 
 impl Default for AppConfig {
@@ -39,6 +41,7 @@ impl Default for AppConfig {
             user_book_limit: 2000,
             chapter_update_interval_hours: 24,
             chapter_update_concurrency: 3,
+            remote_webview_url: String::new(),
         }
     }
 }
@@ -68,7 +71,16 @@ pub fn load() -> anyhow::Result<AppConfig> {
             "chapter_update_concurrency",
             defaults.chapter_update_concurrency as i64,
         )?
+        .set_default("remote_webview_url", defaults.remote_webview_url)?
         .add_source(config::Environment::default().try_parsing(true))
         .build()?;
-    Ok(cfg.try_deserialize()?)
+    let mut cfg: AppConfig = cfg.try_deserialize()?;
+    if cfg.remote_webview_url.trim().is_empty() {
+        cfg.remote_webview_url = std::env::var("READER_APP_REMOTEWEBVIEWAPI")
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+    }
+    cfg.remote_webview_url = cfg.remote_webview_url.trim().trim_end_matches('/').to_string();
+    Ok(cfg)
 }

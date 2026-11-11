@@ -36,7 +36,12 @@ pub async fn run() -> anyhow::Result<()> {
     tracing::debug!("rule engine created");
     let cache = FileCache::new(format!("{}/cache", cfg.storage_dir));
 
-    let book_service = Arc::new(BookService::new(http, parser, cache, &cfg.storage_dir));
+    let book_service = Arc::new(
+        BookService::new(http, parser, cache, &cfg.storage_dir).with_remote_webview(
+            &cfg.remote_webview_url,
+            std::time::Duration::from_secs(cfg.request_timeout_secs),
+        ),
+    );
     let book_source_service = Arc::new(BookSourceService::new(repo, &cfg.storage_dir));
     let local_txt_book_service = Arc::new(LocalTxtBookService::new(&cfg.storage_dir));
     let local_epub_book_service = Arc::new(LocalEpubBookService::new(&cfg.storage_dir));
