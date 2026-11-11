@@ -74,7 +74,7 @@ normalize_version() {
   echo "$raw"
 }
 
-latest_tag="$(git tag --list 'v*' | sort -V | tail -1)"
+latest_tag="$(git tag --list 'v*' | awk '/^v[0-9]+\.[0-9]+\.[0-9]+$/' | sort -V | tail -1)"
 
 if [[ -n "$INPUT_VERSION" ]]; then
   SEMVER="$(normalize_version "$INPUT_VERSION")"
@@ -83,6 +83,7 @@ else
   if [[ -z "$base" || ! "$base" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     base="$(node -p "require('./frontend/package.json').version")"
   fi
+  base="${base%%-*}"
   IFS='.' read -r major minor patch <<<"$base"
   case "$BUMP_MODE" in
     major)
