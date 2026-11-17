@@ -96,6 +96,16 @@
       @close="subscriptionPanelVisible = false"
     />
 
+    <SourceImportPreview
+      v-if="importPreview"
+      :values="importPreview.values"
+      :existing="importPreview.existing"
+      :busy="importSaving"
+      :error="importError"
+      @cancel="importPreview = null"
+      @confirm="confirmImport"
+    />
+
     <Transition name="scale">
       <div v-if="loginPreviewVisible" class="login-preview-container" @click.self="loginPreviewVisible = false">
         <div class="login-preview-modal">
@@ -120,6 +130,7 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
 import {
+  getBookSources,
   deleteBookSource,
   deleteBookSources,
   deleteInvalidBookSources,
@@ -148,6 +159,8 @@ import SourceList from './source-manager/SourceList.vue'
 import SourceManagerHeader from './source-manager/SourceManagerHeader.vue'
 import SourceSubscriptionPanel from './source-manager/SourceSubscriptionPanel.vue'
 import { storeToRefs } from 'pinia'
+import SourceImportPreview from './source-manager/SourceImportPreview.vue'
+import { parseRemoteImport, sourceFingerprint } from '../utils/sourceImport'
 
 type SourceSubscription = {
   url: string
@@ -167,6 +180,13 @@ const emit = defineEmits<{
 const appStore = useAppStore()
 const sourceStore = useSourceStore()
 const { sources, loading } = storeToRefs(sourceStore)
+
+type ImportPreview = { values: unknown[]; existing: BookSource[]; subscriptionUrl?: string }
+const importPreview = ref<ImportPreview | null>(null)
+const importSaving = ref(false)
+const importReading = ref(false)
+const importError = ref('')
+let importGeneration = 0
 
 const testingSources = ref(false)
 const filterText = ref('')
@@ -493,13 +513,7 @@ async function handleFileImport(event: Event) {
   const file = input.files?.[0]
   if (!file) return
   try {
-    const imported = await readSourceFile(file)
-    if (!imported.length) {
-      throw new Error('文件中没有可导入的书源')
-    }
-    await saveBookSources(imported)
-    appStore.showToast(`成功导入 ${imported.length} 个书源`, 'success')
-    await loadSources()
+    await openImport(() => readSourceFile(file))
   } catch (e: unknown) {
     appStore.showToast((e as Error).message || '导入失败', 'error')
   } finally {
@@ -512,25 +526,55 @@ async function importRemoteSource() {
     appStore.showToast('请输入远程书源链接', 'warning')
     return
   }
+  const url = remoteUrl.value
+  await openImport(async () => parseRemoteImport(await readRemoteSourceFile(url)), url)
+}
+
+async function openImport(read: () => Promise<unknown[]>, subscriptionUrl?: string) {
+  if (importReading.value || importPreview.value || importSaving.value) return
+  const generation = ++importGeneration
+  importReading.value = true
   try {
-    const raw = await readRemoteSourceFile(remoteUrl.value)
-    const parsed = raw.flatMap((item) => {
-      try {
-        const value = JSON.parse(item)
-        return Array.isArray(value) ? value : [value]
-      } catch {
-        return []
-      }
-    }) as BookSource[]
-    if (!parsed.length) {
-      throw new Error('远程书源文件为空或格式错误')
+    const values = await read()
+    if (!values.length) throw new Error('没有可导入的书源')
+    const existing = await getBookSources()
+    if (generation !== importGeneration || !props.modelValue) return
+    importError.value = ''
+    importPreview.value = { values, existing, subscriptionUrl }
+  } catch (e: unknown) {
+    if (generation === importGeneration) appStore.showToast((e as Error).message || '读取书源失败', 'error')
+  } finally {
+    importReading.value = false
+  }
+}
+
+async function confirmImport(selected: BookSource[]) {
+  const preview = importPreview.value
+  if (!preview || importSaving.value || !selected.length) return
+  importSaving.value = true
+  importError.value = ''
+  try {
+    const latest = await getBookSources()
+    const before = new Map(preview.existing.map((source) => [source.bookSourceUrl, sourceFingerprint(source)]))
+    const current = new Map(latest.map((source) => [source.bookSourceUrl, sourceFingerprint(source)]))
+    const changed = selected.some((source) => before.get(source.bookSourceUrl) !== current.get(source.bookSourceUrl))
+    preview.existing = latest
+    if (changed) {
+      importError.value = '所选地址的现有书源已变化，已刷新状态。请核对后重新点击确认导入。'
+      return
     }
-    await saveBookSources(parsed)
-    touchSubscription(remoteUrl.value)
-    appStore.showToast(`成功同步 ${parsed.length} 个书源`, 'success')
+    const updates = selected.filter((source) => current.has(source.bookSourceUrl)).length
+    if (updates && !confirm(`将更新 ${updates} 个现有书源，是否继续？`)) return
+    const result = await saveBookSources(selected)
+    if (!result.saved || result.count !== selected.length) throw new Error('保存结果未确认全部完成，请刷新核对后重试')
+    if (preview.subscriptionUrl) touchSubscription(preview.subscriptionUrl)
+    importPreview.value = null
+    appStore.showToast('所选书源已保存', 'success')
     await loadSources()
   } catch (e: unknown) {
-    appStore.showToast((e as Error).message || '远程同步失败', 'error')
+    importError.value = (e as Error).message || '保存失败，请核对后重试'
+  } finally {
+    importSaving.value = false
   }
 }
 
@@ -583,10 +627,14 @@ function formatDateForFile() {
 }
 
 function close() {
+  if (importSaving.value) return
+  importGeneration++
+  importPreview.value = null
   emit('update:modelValue', false)
 }
 
 watch(() => props.modelValue, (v) => {
+  if (!v) { importGeneration++; if (!importSaving.value) importPreview.value = null }
   if (v) {
     if (!sourceStore.loaded) {
       loadSources(false)
