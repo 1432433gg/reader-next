@@ -1,5 +1,9 @@
 <template>
   <section class="editor-panel">
+    <button class="workspace-toggle" type="button" :aria-expanded="expanded" @click="$emit('toggle')">
+      <span>书源工作区</span><span aria-hidden="true">{{ expanded ? '收起 ▴' : '展开 ▾' }}</span>
+    </button>
+    <div v-show="expanded" class="editor-content">
     <header class="editor-head">
       <div class="editor-title">
         <h3>{{ source ? source.bookSourceName : '书源工作区' }}</h3>
@@ -91,6 +95,7 @@
         </button>
       </div>
     </div>
+    </div>
   </section>
 </template>
 
@@ -102,6 +107,7 @@ import { getBookSourceOverview } from '../../utils/sourceSelection'
 type TabKey = 'overview' | 'json' | 'login'
 
 const props = defineProps<{
+  expanded: boolean
   source: BookSource | null
   editorText: string
   canLogin: boolean
@@ -109,6 +115,7 @@ const props = defineProps<{
 }>()
 
 defineEmits<{
+  toggle: []
   'update:editorText': [value: string]
   format: []
   save: []
@@ -128,6 +135,8 @@ const overview = computed(() => getBookSourceOverview(props.source))
 </script>
 
 <style scoped>
+.workspace-toggle { width: 100%; display: flex; justify-content: space-between; align-items: center; min-height: 42px; padding: 10px 14px; flex: 0 0 auto; text-align: left; font: inherit; font-size: 14px; font-weight: 600; }
+.editor-content { display: flex; flex-direction: column; min-height: 0; flex: 1; overflow: auto; }
 .editor-panel {
   min-height: 0;
   border: 1px solid var(--color-border-light);
@@ -201,6 +210,12 @@ const overview = computed(() => getBookSourceOverview(props.source))
   flex: 1;
   min-height: 0;
   overflow: auto;
+}
+
+/* Keep the draft reachable inside the bounded workspace on short screens. */
+.json-pane {
+  flex: 1 0 auto;
+  min-height: 128px;
 }
 
 .overview-pane,
@@ -281,7 +296,7 @@ const overview = computed(() => getBookSourceOverview(props.source))
 
 .editor-textarea {
   width: 100%;
-  min-height: 100%;
+  min-height: 128px;
   resize: none;
   border: none;
   outline: none;
@@ -294,7 +309,7 @@ const overview = computed(() => getBookSourceOverview(props.source))
 }
 
 .editor-empty {
-  min-height: 260px;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -351,7 +366,11 @@ const overview = computed(() => getBookSourceOverview(props.source))
 @media (max-width: 560px) {
   .editor-head {
     flex-direction: column;
+    padding: 8px 10px;
+    gap: 6px;
   }
+
+  .editor-tabs { padding: 6px 10px; }
 
   .editor-actions {
     width: 100%;

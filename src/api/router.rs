@@ -279,6 +279,14 @@ pub fn build_router(state: AppState) -> Router {
             post(handlers::dismiss_version_update),
         )
         .route("/reader3/saveUserConfig", post(handlers::save_user_config))
+        .route(
+            "/reader3/getSourceSubscriptions",
+            get(handlers::get_source_subscriptions),
+        )
+        .route(
+            "/reader3/changeSourceSubscriptions",
+            post(handlers::change_source_subscriptions),
+        )
         .route("/reader3/getUserConfig", get(handlers::get_user_config))
         .route("/reader3/getUserList", get(handlers::get_user_list))
         .route("/reader3/deleteUsers", post(handlers::delete_users))

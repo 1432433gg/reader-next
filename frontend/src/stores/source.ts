@@ -8,17 +8,25 @@ export const useSourceStore = defineStore('source', () => {
   const loading = ref(false)
   const loaded = ref(false)
   let loadingTask: Promise<void> | null = null
+  let generation = 0
+
+  function reset() {
+    generation++; sources.value = []; loaded.value = false; loading.value = false; loadingTask = null
+  }
 
   async function fetchSources(options: { force?: boolean } = {}) {
     if (loaded.value && !options.force) return
     if (loadingTask) return loadingTask
     loading.value = true
+    const epoch = generation
     loadingTask = getBookSources()
       .then((list) => {
+        if (epoch !== generation) return
         sources.value = list
         loaded.value = true
       })
       .finally(() => {
+        if (epoch !== generation) return
         loading.value = false
         loadingTask = null
       })
@@ -29,6 +37,7 @@ export const useSourceStore = defineStore('source', () => {
     sources,
     loading,
     loaded,
-    fetchSources
+    fetchSources,
+    reset,
   }
 })

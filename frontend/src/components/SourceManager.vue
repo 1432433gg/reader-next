@@ -65,6 +65,9 @@
 
             <SourceEditorPanel
               class="editor-slot"
+              :class="{ 'editor-collapsed': !workspaceExpanded }"
+              :expanded="workspaceExpanded"
+              @toggle="toggleWorkspace"
               :source="editingSource"
               :editor-text="editorText"
               :can-login="canLoginSource"
@@ -89,6 +92,16 @@
       v-model:remote-url="remoteUrl"
       :visible="subscriptionPanelVisible"
       :subscriptions="subscriptions"
+      :account="account"
+      :loaded="subscriptionState.loaded.value"
+      :loading="subscriptionState.loading.value"
+      :busy="subscriptionState.busy.value"
+      :error="subscriptionState.error.value"
+      :migration-available="subscriptionState.migrationAvailable.value"
+      :pending-timestamps="subscriptionState.pendingTimestamps.value"
+      @refresh="subscriptionState.refresh"
+      @migrate="subscriptionState.migrate"
+      @retry-timestamp="retrySubscriptionTimestamp"
       @sync="importRemoteSource"
       @save="saveSubscription"
       @sync-subscription="syncSubscription"
@@ -102,7 +115,7 @@
       :existing="importPreview.existing"
       :busy="importSaving"
       :error="importError"
-      @cancel="importPreview = null"
+      @cancel="cancelImport"
       @confirm="confirmImport"
     />
 
@@ -128,7 +141,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import {
   getBookSources,
   deleteBookSource,
@@ -161,13 +174,7 @@ import SourceSubscriptionPanel from './source-manager/SourceSubscriptionPanel.vu
 import { storeToRefs } from 'pinia'
 import SourceImportPreview from './source-manager/SourceImportPreview.vue'
 import { parseRemoteImport, sourceFingerprint } from '../utils/sourceImport'
-
-type SourceSubscription = {
-  url: string
-  lastSyncedAt?: number
-}
-
-const SUBSCRIPTION_KEY = 'reader-source-subscriptions'
+import { useSourceSubscriptions } from '../composables/useSourceSubscriptions'
 
 const props = defineProps<{
   modelValue: boolean
@@ -187,6 +194,11 @@ const importSaving = ref(false)
 const importReading = ref(false)
 const importError = ref('')
 let importGeneration = 0
+let importController: AbortController | null = null
+function cancelImport() {
+  importGeneration++; importController?.abort(); importController = null
+  importPreview.value = null; importReading.value = false
+}
 
 const testingSources = ref(false)
 const filterText = ref('')
@@ -196,7 +208,25 @@ const selectedSourceUrls = ref(new Set<string>())
 
 const subscriptionPanelVisible = ref(false)
 const remoteUrl = ref('')
-const subscriptions = ref<SourceSubscription[]>(loadSubscriptions())
+const account = computed(() => appStore.isLoggedIn ? appStore.userInfo?.username || null : null)
+const subscriptionState = useSourceSubscriptions(account, subscriptionPanelVisible)
+const subscriptions = subscriptionState.items
+const workspaceExpanded = ref(false)
+let workspaceManual = false
+function defaultWorkspace() {
+  if (!workspaceManual) workspaceExpanded.value = (window.visualViewport?.width ?? window.innerWidth) > 900 && (window.visualViewport?.height ?? window.innerHeight) >= 640
+}
+function toggleWorkspace() { workspaceManual = true; workspaceExpanded.value = !workspaceExpanded.value }
+onMounted(() => {
+  defaultWorkspace()
+  window.addEventListener('resize', defaultWorkspace)
+  window.visualViewport?.addEventListener('resize', defaultWorkspace)
+})
+onBeforeUnmount(() => {
+  cancelImport()
+  window.removeEventListener('resize', defaultWorkspace)
+  window.visualViewport?.removeEventListener('resize', defaultWorkspace)
+})
 
 const editingSource = ref<BookSource | null>(null)
 const editorText = ref(JSON.stringify(createEmptySource(), null, 2))
@@ -247,25 +277,13 @@ function createEmptySource(): BookSource {
   }
 }
 
-function loadSubscriptions(): SourceSubscription[] {
-  try {
-    const raw = localStorage.getItem(SUBSCRIPTION_KEY)
-    return raw ? JSON.parse(raw) : []
-  } catch {
-    return []
-  }
-}
-
-function persistSubscriptions() {
-  localStorage.setItem(SUBSCRIPTION_KEY, JSON.stringify(subscriptions.value))
-}
-
 async function loadSources(force = true) {
+  const identity = account.value
   try {
     await sourceStore.fetchSources({ force })
     pruneSelection()
   } catch (e: unknown) {
-    appStore.showToast((e as Error).message, 'error')
+    if (identity === account.value) appStore.showToast((e as Error).message, 'error')
   }
 }
 
@@ -513,7 +531,7 @@ async function handleFileImport(event: Event) {
   const file = input.files?.[0]
   if (!file) return
   try {
-    await openImport(() => readSourceFile(file))
+    await openImport((signal) => readSourceFile(file, signal))
   } catch (e: unknown) {
     appStore.showToast((e as Error).message || '导入失败', 'error')
   } finally {
@@ -527,34 +545,39 @@ async function importRemoteSource() {
     return
   }
   const url = remoteUrl.value
-  await openImport(async () => parseRemoteImport(await readRemoteSourceFile(url)), url)
+  await openImport(async (signal) => parseRemoteImport(await readRemoteSourceFile(url, signal)), url)
 }
 
-async function openImport(read: () => Promise<unknown[]>, subscriptionUrl?: string) {
+async function openImport(read: (signal: AbortSignal) => Promise<unknown[]>, subscriptionUrl?: string) {
   if (importReading.value || importPreview.value || importSaving.value) return
   const generation = ++importGeneration
+  importController?.abort()
+  const controller = new AbortController(); importController = controller
   importReading.value = true
   try {
-    const values = await read()
+    const values = await read(controller.signal)
     if (!values.length) throw new Error('没有可导入的书源')
-    const existing = await getBookSources()
+    const existing = await getBookSources(controller.signal)
     if (generation !== importGeneration || !props.modelValue) return
     importError.value = ''
     importPreview.value = { values, existing, subscriptionUrl }
   } catch (e: unknown) {
     if (generation === importGeneration) appStore.showToast((e as Error).message || '读取书源失败', 'error')
   } finally {
-    importReading.value = false
+    if (generation === importGeneration) importReading.value = false
   }
 }
 
 async function confirmImport(selected: BookSource[]) {
   const preview = importPreview.value
-  if (!preview || importSaving.value || !selected.length) return
+  const generation = importGeneration
+  const signal = importController?.signal
+  if (!preview || !signal || signal.aborted || importSaving.value || !selected.length) return
   importSaving.value = true
   importError.value = ''
   try {
-    const latest = await getBookSources()
+    const latest = await getBookSources(signal)
+    if (generation !== importGeneration || preview !== importPreview.value) return
     const before = new Map(preview.existing.map((source) => [source.bookSourceUrl, sourceFingerprint(source)]))
     const current = new Map(latest.map((source) => [source.bookSourceUrl, sourceFingerprint(source)]))
     const changed = selected.some((source) => before.get(source.bookSourceUrl) !== current.get(source.bookSourceUrl))
@@ -565,49 +588,40 @@ async function confirmImport(selected: BookSource[]) {
     }
     const updates = selected.filter((source) => current.has(source.bookSourceUrl)).length
     if (updates && !confirm(`将更新 ${updates} 个现有书源，是否继续？`)) return
-    const result = await saveBookSources(selected)
+    const result = await saveBookSources(selected, signal)
     if (!result.saved || result.count !== selected.length) throw new Error('保存结果未确认全部完成，请刷新核对后重试')
-    if (preview.subscriptionUrl) touchSubscription(preview.subscriptionUrl)
+    if (generation !== importGeneration) return
     importPreview.value = null
     appStore.showToast('所选书源已保存', 'success')
+    if (preview.subscriptionUrl && account.value) {
+      const ok = await subscriptionState.markSynced(preview.subscriptionUrl)
+      if (generation !== importGeneration) return
+      if (!ok) appStore.showToast('书源已保存，但订阅时间同步失败；可在远程面板重试时间同步。', 'warning')
+    }
     await loadSources()
   } catch (e: unknown) {
-    importError.value = (e as Error).message || '保存失败，请核对后重试'
+    if (generation === importGeneration) importError.value = (e as Error).message || '保存失败，请核对后重试'
   } finally {
-    importSaving.value = false
+    if (generation === importGeneration) importSaving.value = false
   }
 }
 
-function saveSubscription() {
-  if (!remoteUrl.value) {
-    appStore.showToast('请输入远程书源链接', 'warning')
-    return
-  }
-  if (!subscriptions.value.find((item) => item.url === remoteUrl.value)) {
-    subscriptions.value.unshift({ url: remoteUrl.value })
-    persistSubscriptions()
-    appStore.showToast('订阅已保存', 'success')
-  }
+async function saveSubscription() {
+  const url = remoteUrl.value.trim()
+  if (!url) { appStore.showToast('请输入远程书源链接', 'warning'); return }
+  if (await subscriptionState.mutate({ operation: 'add', url })) appStore.showToast('订阅已同步到当前账号', 'success')
 }
-
 async function syncSubscription(url: string) {
   remoteUrl.value = url
   await importRemoteSource()
 }
-
-function removeSubscription(url: string) {
-  subscriptions.value = subscriptions.value.filter((item) => item.url !== url)
-  persistSubscriptions()
+async function removeSubscription(url: string) {
+  if (await subscriptionState.mutate({ operation: 'remove', url })) appStore.showToast('订阅已删除并同步', 'success')
 }
-
-function touchSubscription(url: string) {
-  const existing = subscriptions.value.find((item) => item.url === url)
-  if (existing) {
-    existing.lastSyncedAt = Date.now()
-  } else {
-    subscriptions.value.unshift({ url, lastSyncedAt: Date.now() })
-  }
-  persistSubscriptions()
+async function retrySubscriptionTimestamp(target?: string) {
+  const url = target || subscriptionState.pendingTimestamp.value
+  if (!url || !subscriptionState.pendingTimestamps.value.includes(url)) return
+  if (url && await subscriptionState.markSynced(url)) appStore.showToast('订阅时间已同步', 'success')
 }
 
 function exportSources() {
@@ -628,14 +642,14 @@ function formatDateForFile() {
 
 function close() {
   if (importSaving.value) return
-  importGeneration++
-  importPreview.value = null
+  cancelImport()
   emit('update:modelValue', false)
 }
 
 watch(() => props.modelValue, (v) => {
-  if (!v) { importGeneration++; if (!importSaving.value) importPreview.value = null }
+  if (!v) { cancelImport(); importSaving.value = false }
   if (v) {
+    workspaceManual = false; defaultWorkspace()
     if (!sourceStore.loaded) {
       loadSources(false)
     }
@@ -644,6 +658,14 @@ watch(() => props.modelValue, (v) => {
     }
   }
 }, { immediate: true })
+watch(account, (next, previous) => {
+  if (next === previous) return
+  cancelImport(); importSaving.value = false
+  remoteUrl.value = ''; selectedSourceUrls.value.clear(); editingSource.value = null
+  editorText.value = JSON.stringify(createEmptySource(), null, 2)
+  sourceStore.reset()
+  if (props.modelValue) void loadSources()
+}, { flush: 'sync' })
 </script>
 
 <style scoped>
@@ -671,8 +693,8 @@ watch(() => props.modelValue, (v) => {
 
 .source-modal {
   width: min(1180px, 100%);
-  height: min(780px, calc(var(--app-height, 100dvh) - var(--safe-area-top) - var(--safe-area-bottom) - 32px));
-  max-height: min(88vh, calc(var(--app-height, 100dvh) - var(--safe-area-top) - var(--safe-area-bottom) - 32px));
+  height: min(780px, calc(var(--app-visual-height, var(--app-height, 100vh)) - var(--safe-area-top) - var(--safe-area-bottom) - 32px));
+  max-height: min(88vh, calc(var(--app-visual-height, var(--app-height, 100vh)) - var(--safe-area-top) - var(--safe-area-bottom) - 32px));
   background: var(--color-bg-elevated);
   border-radius: var(--radius-xl);
   display: flex;
@@ -813,30 +835,35 @@ watch(() => props.modelValue, (v) => {
 
   .source-modal {
     width: 100%;
-    height: calc(var(--app-height, 100dvh) - 16px);
-    max-height: calc(var(--app-height, 100dvh) - 16px);
+    height: calc(var(--app-visual-height, var(--app-height, 100vh)) - 16px);
+    max-height: calc(var(--app-visual-height, var(--app-height, 100vh)) - 16px);
     border-radius: 24px;
     overflow-y: auto;
-    -webkit-overflow-scrolling: touch;
   }
 
   .content-grid {
     display: flex;
     flex-direction: column;
-    overflow: visible;
-    flex: none;
+    overflow: hidden;
+    flex: 1;
+    min-height: 180px;
     padding-left: 16px;
     padding-right: 16px;
   }
 
   .editor-slot {
     order: -1;
-    min-height: 360px;
-    max-height: min(58vh, 560px);
+    min-height: 0;
+    flex: 0 1 auto;
+    max-height: min(52%, 300px);
   }
 
+  .editor-collapsed { flex: 0 0 auto; max-height: none; }
+
   .source-list-slot {
-    max-height: min(46vh, 460px);
+    flex: 1;
+    min-height: 64px;
+    max-height: none;
   }
 
   .modal-footer {

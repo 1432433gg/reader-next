@@ -72,13 +72,38 @@ impl JsonDocumentService {
         self.set_value(namespace, name, list).await
     }
 
-    async fn get_raw(&self, namespace: &str, name: &str) -> Result<Option<String>, AppError> {
+    pub(crate) async fn get_raw(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> Result<Option<String>, AppError> {
         let row = sqlx::query("SELECT json FROM json_documents WHERE namespace=?1 AND name=?2")
             .bind(namespace)
             .bind(name)
             .fetch_optional(&self.pool)
             .await?;
         Ok(row.map(|row| row.get::<String, _>("json")))
+    }
+
+    /// Compare the exact document read by the caller. A stale writer retries its
+    /// single operation against the new document, never replacing a stale list.
+    pub(crate) async fn compare_and_set_raw(
+        &self,
+        namespace: &str,
+        name: &str,
+        expected: Option<&str>,
+        next: &str,
+    ) -> Result<bool, AppError> {
+        let result = if let Some(expected) = expected {
+            sqlx::query("UPDATE json_documents SET json=?1, updated_at=?2 WHERE namespace=?3 AND name=?4 AND json=?5")
+                .bind(next).bind(now_ts() * 1000).bind(namespace).bind(name).bind(expected)
+                .execute(&self.pool).await?
+        } else {
+            sqlx::query("INSERT INTO json_documents(namespace,name,json,updated_at) VALUES (?1,?2,?3,?4) ON CONFLICT(namespace,name) DO NOTHING")
+                .bind(namespace).bind(name).bind(next).bind(now_ts() * 1000)
+                .execute(&self.pool).await?
+        };
+        Ok(result.rows_affected() == 1)
     }
 
     async fn set_raw(&self, namespace: &str, name: &str, json: &str) -> Result<(), AppError> {
