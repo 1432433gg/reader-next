@@ -34,4 +34,15 @@ describe('source store cache', () => {
     expect(getBookSources).toHaveBeenCalledTimes(2)
     expect(store.sources[0]?.bookSourceName).toBe('B')
   })
+  it('does not let an old account request replace the new account list', async () => {
+    let finish!: (value: { bookSourceName: string; bookSourceUrl: string }[]) => void
+    vi.mocked(getBookSources).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }))
+    const store = useSourceStore()
+    const old = store.fetchSources()
+    store.reset()
+    vi.mocked(getBookSources).mockResolvedValue([{ bookSourceName: 'new account', bookSourceUrl: 'new' }])
+    await store.fetchSources()
+    finish([{ bookSourceName: 'old account', bookSourceUrl: 'old' }]); await old
+    expect(store.sources.map((source) => source.bookSourceUrl)).toEqual(['new'])
+  })
 })

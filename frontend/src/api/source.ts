@@ -2,8 +2,8 @@ import http from './http'
 import type { BookSource, BookSourceTestResponse } from '../types'
 import { MAX_SOURCE_TEST_BATCH_SIZE } from '../utils/sourceTesting'
 
-export function getBookSources() {
-  return http.get<BookSource[]>('/getBookSources').then((r) => r.data)
+export function getBookSources(signal?: AbortSignal) {
+  return http.get<BookSource[]>('/getBookSources', { signal }).then((r) => r.data)
 }
 
 export function getDefaultBookSourceOwner() {
@@ -29,8 +29,8 @@ export function saveBookSource(source: BookSource) {
   return http.post<{ saved: boolean }>('/saveBookSource', source).then((r) => r.data)
 }
 
-export function saveBookSources(sources: BookSource[]) {
-  return http.post<{ saved: boolean; count: number }>('/saveBookSources', sources).then((r) => r.data)
+export function saveBookSources(sources: BookSource[], signal?: AbortSignal) {
+  return http.post<{ saved: boolean; count: number }>('/saveBookSources', sources, { signal }).then((r) => r.data)
 }
 
 export function deleteBookSource(bookSourceUrl: string) {
@@ -65,14 +65,15 @@ export function setAsDefaultBookSources(username: string) {
   return http.post<{ success: boolean; count: number }>('/setAsDefaultBookSources', { username }).then((r) => r.data)
 }
 
-export function readRemoteSourceFile(url: string) {
-  return http.post<string[]>('/readRemoteSourceFile', { url }).then((r) => r.data)
+export function readRemoteSourceFile(url: string, signal?: AbortSignal) {
+  return http.post<string[]>('/readRemoteSourceFile', { url }, { signal }).then((r) => r.data)
 }
 
-export function readSourceFile(file: File) {
+export function readSourceFile(file: File, signal?: AbortSignal) {
   const formData = new FormData()
   formData.append('file', file)
   return http.post<BookSource[]>('/readSourceFile', formData, {
+    signal,
     headers: {
       'Content-Type': 'multipart/form-data',
     },

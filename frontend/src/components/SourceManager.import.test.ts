@@ -5,6 +5,11 @@ import SourceManager from './SourceManager.vue'
 import SourceImportPreview from './source-manager/SourceImportPreview.vue'
 import SourceSubscriptionPanel from './source-manager/SourceSubscriptionPanel.vue'
 import * as api from '../api/source'
+import * as subscriptionApi from '../api/sourceSubscriptions'
+import { useAppStore } from '../stores/app'
+import type { UserInfo } from '../types'
+
+vi.mock('../api/sourceSubscriptions', () => ({ getSourceSubscriptions: vi.fn(), changeSourceSubscriptions: vi.fn() }))
 
 vi.mock('../api/source', async (original) => ({
   ...await original<typeof import('../api/source')>(),
@@ -23,7 +28,11 @@ beforeEach(() => {
   vi.mocked(api.readRemoteSourceFile).mockResolvedValue([JSON.stringify(pack)])
   vi.mocked(api.saveBookSources).mockResolvedValue({ saved: true, count: 1 })
   vi.stubGlobal('confirm', vi.fn(() => true))
-  wrapper = mount(SourceManager, { props: { modelValue: true }, global: { plugins: [createPinia()] }, attachTo: document.body })
+  vi.mocked(subscriptionApi.getSourceSubscriptions).mockResolvedValue({ revision: 0, items: [] })
+  vi.mocked(subscriptionApi.changeSourceSubscriptions).mockResolvedValue({ revision: 1, items: [] })
+  const pinia = createPinia()
+  useAppStore(pinia).updateUserInfo({ username: 'test-account' } as UserInfo)
+  wrapper = mount(SourceManager, { props: { modelValue: true }, global: { plugins: [pinia] }, attachTo: document.body })
 })
 afterEach(() => { wrapper?.unmount(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
 async function open(entry: string) {
@@ -52,17 +61,17 @@ describe('three import entrypoints', () => {
       preview.vm.$emit('cancel')
       await flushPromises()
       expect(api.saveBookSources).not.toHaveBeenCalled()
-      expect(localStorage.getItem('reader-source-subscriptions') || '').not.toContain('lastSyncedAt')
+      expect(vi.mocked(subscriptionApi.changeSourceSubscriptions).mock.calls.some(([operation]) => operation.operation === 'synced')).toBe(false)
     })
     it(`${entry}: saves only selected objects and updates time only after success`, async () => {
       const preview = await open(entry)
       await preview.get('input[type=checkbox]').setValue(true)
       await preview.get('.import-actions button:last-child').trigger('click')
       await flushPromises()
-      expect(api.saveBookSources).toHaveBeenCalledExactlyOnceWith([pack[0]])
+      expect(api.saveBookSources).toHaveBeenCalledExactlyOnceWith([pack[0]], expect.anything())
       if (entry !== 'local') {
-        expect(api.readRemoteSourceFile).toHaveBeenCalledExactlyOnceWith('https://package.example/only.json')
-        expect(localStorage.getItem('reader-source-subscriptions')).toContain('lastSyncedAt')
+        expect(api.readRemoteSourceFile).toHaveBeenCalledExactlyOnceWith('https://package.example/only.json', expect.anything())
+        expect(subscriptionApi.changeSourceSubscriptions).toHaveBeenCalledWith({ operation: 'synced', url: 'https://package.example/only.json' }, expect.anything())
       }
     })
   }
@@ -87,14 +96,14 @@ describe('three import entrypoints', () => {
     reject(new Error('controlled failure')); await flushPromises()
     expect(preview.text()).toContain('controlled failure')
     expect(preview.get<HTMLInputElement>('input[type=checkbox]').element.checked).toBe(true)
-    expect(localStorage.getItem('reader-source-subscriptions')).not.toContain('lastSyncedAt')
+    expect(vi.mocked(subscriptionApi.changeSourceSubscriptions).mock.calls.some(([operation]) => operation.operation === 'synced')).toBe(false)
   })
   it('does not clear selection when an unselected source changes; download failure writes nothing', async () => {
     const preview = await open('remote')
     await preview.get('input[type=checkbox]').setValue(true)
     vi.mocked(api.getBookSources).mockResolvedValue([{ ...pack[1]!, bookSourceName: 'unselected change' }])
     await preview.get('.import-actions button:last-child').trigger('click'); await flushPromises()
-    expect(api.saveBookSources).toHaveBeenCalledExactlyOnceWith([pack[0]])
+    expect(api.saveBookSources).toHaveBeenCalledExactlyOnceWith([pack[0]], expect.anything())
     vi.mocked(api.saveBookSources).mockClear()
     vi.mocked(api.readRemoteSourceFile).mockRejectedValue(new Error('download failed'))
     await open('remote')
@@ -108,6 +117,38 @@ describe('three import entrypoints', () => {
     await preview.get('.import-actions button:last-child').trigger('click'); await flushPromises()
     expect(preview.text()).toContain('未确认全部完成')
     expect(preview.get<HTMLInputElement>('input[type=checkbox]').element.checked).toBe(true)
-    expect(localStorage.getItem('reader-source-subscriptions')).not.toContain('lastSyncedAt')
+    expect(vi.mocked(subscriptionApi.changeSourceSubscriptions).mock.calls.some(([operation]) => operation.operation === 'synced')).toBe(false)
+  })
+  it('ignores a file/link read completed after an account change', async () => {
+    let finish!: (value: string[]) => void
+    vi.mocked(api.readRemoteSourceFile).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }))
+    await open('remote')
+    useAppStore().updateUserInfo({ username: 'other-account' } as UserInfo)
+    expect(vi.mocked(api.readRemoteSourceFile).mock.calls[0]?.[1]?.aborted).toBe(true)
+    finish([JSON.stringify(pack)]); await flushPromises()
+    expect(wrapper.findComponent(SourceImportPreview).exists()).toBe(false)
+    expect(api.saveBookSources).not.toHaveBeenCalled()
+  })
+  it('does not submit an old account selection after delayed save preflight', async () => {
+    const preview = await open('local')
+    await preview.get('input[type=checkbox]').setValue(true)
+    let finish!: (value: typeof pack) => void
+    vi.mocked(api.getBookSources).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve }))
+    await preview.get('.import-actions button:last-child').trigger('click')
+    useAppStore().updateUserInfo({ username: 'other-account' } as UserInfo)
+    finish([]); await flushPromises()
+    expect(api.saveBookSources).not.toHaveBeenCalled()
+  })
+  it('retries failed subscription timestamp updates without saving book sources again', async () => {
+    const preview = await open('remote')
+    await preview.get('input[type=checkbox]').setValue(true)
+    vi.mocked(subscriptionApi.changeSourceSubscriptions).mockRejectedValueOnce(new Error('timestamp update failed'))
+    await preview.get('.import-actions button:last-child').trigger('click'); await flushPromises()
+    expect(api.saveBookSources).toHaveBeenCalledTimes(1)
+    const panel = wrapper.findComponent(SourceSubscriptionPanel)
+    expect(panel.props('pendingTimestamps')).toEqual(['https://package.example/only.json'])
+    panel.vm.$emit('retry-timestamp'); await flushPromises()
+    expect(api.saveBookSources).toHaveBeenCalledTimes(1)
+    expect(panel.props('pendingTimestamps')).toEqual([])
   })
 })

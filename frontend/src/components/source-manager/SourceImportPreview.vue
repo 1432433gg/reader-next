@@ -103,14 +103,14 @@ onBeforeUnmount(() => {
       else element.style.removeProperty('overflow')
     }
   })
-  if (ownsFixedBody) window.scrollTo?.({ left: scrollPosition.x, top: scrollPosition.y, behavior: 'instant' })
+  if (ownsFixedBody) window.scrollTo?.({ left: scrollPosition.x, top: scrollPosition.y, behavior: 'auto' })
   previousFocus?.focus({ preventScroll: true })
 })
 </script>
 
 <style scoped>
-.import-backdrop { position: fixed; inset: 0; z-index: calc(var(--z-modal, 1000) + 3); background: #0008; display: flex; align-items: center; justify-content: center; padding: 12px; overscroll-behavior: none; }
-.import-dialog { box-sizing: border-box; width: min(900px, 100%); height: min(740px, calc(100dvh - 24px)); max-height: calc(100dvh - 24px); min-height: 0; display: flex; flex-direction: column; overflow: hidden; border-radius: 12px; background: var(--color-bg-elevated, white); color: var(--color-text-primary, #222); padding: 16px; gap: 10px; }
+.import-backdrop { position: fixed; top: var(--viewport-offset-top, 0px); bottom: var(--viewport-offset-bottom, 0px); left: 0; right: 0; z-index: calc(var(--z-modal, 1000) + 3); background: #0008; display: flex; align-items: center; justify-content: center; padding: 12px; overscroll-behavior: none; }
+.import-dialog { box-sizing: border-box; width: min(900px, 100%); height: min(740px, calc(var(--app-visual-height, var(--app-height, 100vh)) - 24px)); max-height: calc(var(--app-visual-height, var(--app-height, 100vh)) - 24px); min-height: 0; display: flex; flex-direction: column; overflow: hidden; border-radius: 12px; background: var(--color-bg-elevated, white); color: var(--color-text-primary, #222); padding: 16px; gap: 10px; }
 .import-heading, .import-stats, .import-filters, .import-columns, .import-actions, .import-error { flex: 0 0 auto; min-width: 0; }
 .import-heading h3 { margin: 0 0 6px; font-size: 18px; }
 .import-heading p { margin: 0; font-size: 13px; }

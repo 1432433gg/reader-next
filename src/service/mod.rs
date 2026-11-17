@@ -9,5 +9,6 @@ pub mod local_mobi_book;
 pub mod local_pdf_book;
 pub mod local_txt_book;
 pub mod search_relevance;
+pub mod source_subscription_service;
 pub mod update_service;
 pub mod user_service;

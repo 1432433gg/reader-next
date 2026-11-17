@@ -6,8 +6,10 @@ mod bookmark;
 mod chapter_update;
 mod replace_rule;
 mod rss;
+mod source_subscription;
 mod update;
 mod user;
+pub use source_subscription::{change_source_subscriptions, get_source_subscriptions};
 mod webdav;
 
 pub use book::*;

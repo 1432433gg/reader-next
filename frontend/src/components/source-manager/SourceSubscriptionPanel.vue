@@ -14,6 +14,12 @@
           </button>
         </header>
 
+        <p v-if="!account" role="status">请登录后保存和同步账号订阅。</p>
+        <p v-else class="subscription-account">当前账号：{{ account }}</p>
+        <p v-if="error" role="alert">{{ error }} <button type="button" :disabled="loading || busy" @click="$emit('refresh')">重新读取</button></p>
+        <p v-for="(url, index) in pendingTimestamps" :key="url" role="status" class="timestamp-retry">书源已保存，订阅 {{ index + 1 }} 时间尚未同步：<span>{{ url }}</span><button type="button" :disabled="busy" @click="$emit('retry-timestamp', url)">重试时间同步</button></p>
+        <button v-if="migrationAvailable" type="button" class="action-btn" :disabled="busy" @click="$emit('migrate')">将本机记录同步到当前账号</button>
+
         <div class="remote-form">
           <input
             :value="remoteUrl"
@@ -22,7 +28,7 @@
             @input="$emit('update:remoteUrl', ($event.target as HTMLInputElement).value)"
           />
           <button class="action-btn primary" type="button" @click="$emit('sync')">立即同步</button>
-          <button class="action-btn" type="button" @click="$emit('save')">保存订阅</button>
+          <button class="action-btn" type="button" :disabled="!account || busy" @click="$emit('save')">保存订阅</button>
         </div>
 
         <div v-if="subscriptions.length" class="subscription-list">
@@ -32,12 +38,13 @@
               <span v-if="item.lastSyncedAt" class="subscription-time">上次同步 {{ formatTime(item.lastSyncedAt) }}</span>
             </div>
             <div class="subscription-actions">
-              <button class="mini-btn" type="button" @click="$emit('sync-subscription', item.url)">同步</button>
-              <button class="mini-btn danger" type="button" @click="$emit('remove-subscription', item.url)">删除</button>
+              <button class="mini-btn" type="button" :disabled="busy" @click="$emit('sync-subscription', item.url)">同步</button>
+              <button class="mini-btn danger" type="button" :disabled="busy" @click="$emit('remove-subscription', item.url)">删除</button>
             </div>
           </article>
         </div>
-        <div v-else class="subscription-empty">还没有保存的远程订阅。</div>
+        <div v-else-if="loading" class="subscription-empty">正在读取账号订阅…</div>
+        <div v-else-if="loaded && !error" class="subscription-empty">还没有保存的远程订阅。</div>
       </section>
     </div>
   </Transition>
@@ -53,9 +60,19 @@ defineProps<{
   visible: boolean
   remoteUrl: string
   subscriptions: SourceSubscription[]
+  account: string | null
+  loaded: boolean
+  loading: boolean
+  busy: boolean
+  error: string
+  migrationAvailable: boolean
+  pendingTimestamps: string[]
 }>()
 
 defineEmits<{
+  refresh: []
+  migrate: []
+  'retry-timestamp': [url: string]
   'update:remoteUrl': [value: string]
   sync: []
   save: []
@@ -70,6 +87,8 @@ function formatTime(ts: number) {
 </script>
 
 <style scoped>
+.timestamp-retry { overflow-wrap: anywhere; }
+.timestamp-retry span { display: block; font-size: 12px; }
 .subscription-backdrop {
   position: fixed;
   inset: 0;
