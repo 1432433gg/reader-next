@@ -100,13 +100,14 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed } from 'vue'
 import type { BookSource } from '../../types'
 import { getBookSourceOverview } from '../../utils/sourceSelection'
 
 type TabKey = 'overview' | 'json' | 'login'
 
 const props = defineProps<{
+  activeTab?: TabKey
   expanded: boolean
   source: BookSource | null
   editorText: string
@@ -114,7 +115,8 @@ const props = defineProps<{
   loginLoading: boolean
 }>()
 
-defineEmits<{
+const emit = defineEmits<{
+  'update:activeTab': [tab: TabKey]
   toggle: []
   'update:editorText': [value: string]
   format: []
@@ -124,7 +126,7 @@ defineEmits<{
   'import-local': []
 }>()
 
-const activeTab = ref<TabKey>('overview')
+const activeTab = computed({ get: () => props.activeTab || 'overview', set: (tab: TabKey) => emit('update:activeTab', tab) })
 const tabs: { key: TabKey; label: string }[] = [
   { key: 'overview', label: '概览' },
   { key: 'json', label: 'JSON' },

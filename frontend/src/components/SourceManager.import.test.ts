@@ -71,7 +71,7 @@ describe('three import entrypoints', () => {
       expect(api.saveBookSources).toHaveBeenCalledExactlyOnceWith([pack[0]], expect.anything())
       if (entry !== 'local') {
         expect(api.readRemoteSourceFile).toHaveBeenCalledExactlyOnceWith('https://package.example/only.json', expect.anything())
-        expect(subscriptionApi.changeSourceSubscriptions).toHaveBeenCalledWith({ operation: 'synced', url: 'https://package.example/only.json' }, expect.anything())
+        expect(subscriptionApi.changeSourceSubscriptions).toHaveBeenCalledWith(expect.objectContaining({ operation: 'synced', url: 'https://package.example/only.json' }), expect.anything())
       }
     })
   }

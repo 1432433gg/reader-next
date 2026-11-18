@@ -31,7 +31,7 @@
             <input type="checkbox" :checked="source.enabled !== false" @change="$emit('toggle-enabled', source)" />
             <span class="toggle-slider"></span>
           </label>
-          <button class="icon-btn small" type="button" title="编辑" @click="$emit('edit', source)">
+          <button class="icon-btn small" type="button" title="编辑" @click.stop="$emit('edit-json', source)">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M12 20h9" />
               <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />
@@ -66,6 +66,7 @@ defineProps<{
 
 defineEmits<{
   edit: [source: BookSource]
+  'edit-json': [source: BookSource]
   'toggle-enabled': [source: BookSource]
   'toggle-selection': [source: BookSource]
   delete: [source: BookSource]

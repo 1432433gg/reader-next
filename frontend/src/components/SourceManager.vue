@@ -58,12 +58,15 @@
               :empty-title="sources.length ? '没有匹配的书源' : '暂无书源'"
               :empty-description="sources.length ? '调整搜索关键词或分组筛选后再试' : '可以本地导入、远程同步或手动新增'"
               @edit="editSource"
+              @edit-json="openSourceJson"
               @toggle-enabled="toggleSource"
               @toggle-selection="toggleSourceSelection"
               @delete="removeSource"
             />
 
             <SourceEditorPanel
+              ref="editorPanel"
+              v-model:active-tab="editorTab"
               class="editor-slot"
               :class="{ 'editor-collapsed': !workspaceExpanded }"
               :expanded="workspaceExpanded"
@@ -90,6 +93,11 @@
 
     <SourceSubscriptionPanel
       v-model:remote-url="remoteUrl"
+      v-model:remote-name="remoteName"
+      :edit-draft="subscriptionState.editDraft.value"
+      @edit-subscription="subscriptionState.beginEdit"
+      @save-edit="subscriptionState.saveEdit"
+      @cancel-edit="subscriptionState.editDraft.value = null"
       :visible="subscriptionPanelVisible"
       :subscriptions="subscriptions"
       :account="account"
@@ -141,7 +149,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import {
   getBookSources,
   deleteBookSource,
@@ -188,7 +196,7 @@ const appStore = useAppStore()
 const sourceStore = useSourceStore()
 const { sources, loading } = storeToRefs(sourceStore)
 
-type ImportPreview = { values: unknown[]; existing: BookSource[]; subscriptionUrl?: string }
+type ImportPreview = { values: unknown[]; existing: BookSource[]; subscriptionUrl?: string; subscriptionContext?: { name?: string; existingOnly?: boolean; urlVersion?: number } }
 const importPreview = ref<ImportPreview | null>(null)
 const importSaving = ref(false)
 const importReading = ref(false)
@@ -208,9 +216,12 @@ const selectedSourceUrls = ref(new Set<string>())
 
 const subscriptionPanelVisible = ref(false)
 const remoteUrl = ref('')
+const remoteName = ref('')
 const account = computed(() => appStore.isLoggedIn ? appStore.userInfo?.username || null : null)
 const subscriptionState = useSourceSubscriptions(account, subscriptionPanelVisible)
 const subscriptions = subscriptionState.items
+const editorTab = ref<'overview' | 'json' | 'login'>('overview')
+const editorPanel = ref<InstanceType<typeof SourceEditorPanel> | null>(null)
 const workspaceExpanded = ref(false)
 let workspaceManual = false
 function defaultWorkspace() {
@@ -436,6 +447,22 @@ function createSource() {
   editorText.value = JSON.stringify(createEmptySource(), null, 2)
 }
 
+async function openSourceJson(source: BookSource) {
+  if (editingSource.value?.bookSourceUrl !== source.bookSourceUrl) editSource(source)
+  workspaceManual = true; workspaceExpanded.value = true; editorTab.value = 'json'
+  await nextTick()
+  const element = editorPanel.value?.$el as HTMLElement | undefined
+  const manager = element?.closest<HTMLElement>('.source-modal')
+  if (!element || !manager) return
+  const target = element.querySelector<HTMLElement>('.editor-textarea') || element
+  const r = target.getBoundingClientRect(), bounds = manager.getBoundingClientRect()
+  const viewportTop = window.visualViewport?.offsetTop || 0
+  const top = Math.max(bounds.top, viewportTop)
+  const bottom = Math.min(bounds.bottom, viewportTop + (window.visualViewport?.height || window.innerHeight))
+  if (r.top < top) manager.scrollTop += r.top - top
+  else if (r.bottom > bottom) manager.scrollTop += Math.min(r.bottom - bottom, r.top - top)
+}
+
 function editSource(source: BookSource) {
   editingSource.value = source
   editorText.value = JSON.stringify(source, null, 2)
@@ -544,12 +571,14 @@ async function importRemoteSource() {
     appStore.showToast('请输入远程书源链接', 'warning')
     return
   }
-  const url = remoteUrl.value
-  await openImport(async (signal) => parseRemoteImport(await readRemoteSourceFile(url, signal)), url)
+  if (Array.from(remoteName.value.trim()).length > 80) { appStore.showToast('订阅名称最多80个字符', 'warning'); return }
+  const url = remoteUrl.value.trim()
+  await openImport(async (signal) => parseRemoteImport(await readRemoteSourceFile(url, signal)), url, { name: remoteName.value.trim(), existingOnly: subscriptions.value.some((item) => item.url === url) })
 }
 
-async function openImport(read: (signal: AbortSignal) => Promise<unknown[]>, subscriptionUrl?: string) {
+async function openImport(read: (signal: AbortSignal) => Promise<unknown[]>, subscriptionUrl?: string, subscriptionContext?: { name?: string; existingOnly?: boolean; urlVersion?: number }) {
   if (importReading.value || importPreview.value || importSaving.value) return
+  const capturedContext = subscriptionUrl && subscriptionContext ? subscriptionState.captureContext(subscriptionUrl, subscriptionContext) : subscriptionContext
   const generation = ++importGeneration
   importController?.abort()
   const controller = new AbortController(); importController = controller
@@ -560,7 +589,7 @@ async function openImport(read: (signal: AbortSignal) => Promise<unknown[]>, sub
     const existing = await getBookSources(controller.signal)
     if (generation !== importGeneration || !props.modelValue) return
     importError.value = ''
-    importPreview.value = { values, existing, subscriptionUrl }
+    importPreview.value = { values, existing, subscriptionUrl, subscriptionContext: capturedContext }
   } catch (e: unknown) {
     if (generation === importGeneration) appStore.showToast((e as Error).message || '读取书源失败', 'error')
   } finally {
@@ -594,7 +623,7 @@ async function confirmImport(selected: BookSource[]) {
     importPreview.value = null
     appStore.showToast('所选书源已保存', 'success')
     if (preview.subscriptionUrl && account.value) {
-      const ok = await subscriptionState.markSynced(preview.subscriptionUrl)
+      const ok = await subscriptionState.markSynced(preview.subscriptionUrl, preview.subscriptionContext)
       if (generation !== importGeneration) return
       if (!ok) appStore.showToast('书源已保存，但订阅时间同步失败；可在远程面板重试时间同步。', 'warning')
     }
@@ -609,11 +638,12 @@ async function confirmImport(selected: BookSource[]) {
 async function saveSubscription() {
   const url = remoteUrl.value.trim()
   if (!url) { appStore.showToast('请输入远程书源链接', 'warning'); return }
-  if (await subscriptionState.mutate({ operation: 'add', url })) appStore.showToast('订阅已同步到当前账号', 'success')
+  if (Array.from(remoteName.value.trim()).length > 80) { appStore.showToast('订阅名称最多80个字符', 'warning'); return }
+  if (await subscriptionState.mutate({ operation: 'add', url, name: remoteName.value.trim() })) appStore.showToast('订阅已同步到当前账号', 'success')
 }
 async function syncSubscription(url: string) {
-  remoteUrl.value = url
-  await importRemoteSource()
+  const item = subscriptions.value.find((source) => source.url === url)
+  await openImport(async (signal) => parseRemoteImport(await readRemoteSourceFile(url, signal)), url, { name: item?.name, existingOnly: true })
 }
 async function removeSubscription(url: string) {
   if (await subscriptionState.mutate({ operation: 'remove', url })) appStore.showToast('订阅已删除并同步', 'success')
@@ -621,7 +651,7 @@ async function removeSubscription(url: string) {
 async function retrySubscriptionTimestamp(target?: string) {
   const url = target || subscriptionState.pendingTimestamp.value
   if (!url || !subscriptionState.pendingTimestamps.value.includes(url)) return
-  if (url && await subscriptionState.markSynced(url)) appStore.showToast('订阅时间已同步', 'success')
+  if (url && await subscriptionState.retryTimestamp(url)) appStore.showToast('订阅时间已同步', 'success')
 }
 
 function exportSources() {
@@ -649,6 +679,7 @@ function close() {
 watch(() => props.modelValue, (v) => {
   if (!v) { cancelImport(); importSaving.value = false }
   if (v) {
+    editorTab.value = 'overview'
     workspaceManual = false; defaultWorkspace()
     if (!sourceStore.loaded) {
       loadSources(false)
@@ -661,7 +692,7 @@ watch(() => props.modelValue, (v) => {
 watch(account, (next, previous) => {
   if (next === previous) return
   cancelImport(); importSaving.value = false
-  remoteUrl.value = ''; selectedSourceUrls.value.clear(); editingSource.value = null
+  remoteUrl.value = ''; remoteName.value = ''; selectedSourceUrls.value.clear(); editingSource.value = null
   editorText.value = JSON.stringify(createEmptySource(), null, 2)
   sourceStore.reset()
   if (props.modelValue) void loadSources()
