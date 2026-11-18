@@ -678,23 +678,28 @@ watch(account, (next, previous) => {
 }
 
 .modal-container {
+  --manager-gap: var(--space-6, 24px);
   position: fixed;
-  inset: 0;
+  top: var(--viewport-offset-top, 0px);
+  left: 0;
+  right: 0;
+  height: var(--app-visual-height, var(--app-height, 100vh));
+  box-sizing: border-box;
   z-index: var(--z-modal);
   display: flex;
   align-items: center;
   justify-content: center;
   padding:
-    calc(var(--space-6) + var(--safe-area-top))
-    calc(var(--space-6) + var(--safe-area-right))
-    calc(var(--space-6) + var(--safe-area-bottom))
-    calc(var(--space-6) + var(--safe-area-left));
+    calc(var(--manager-gap) + var(--safe-area-top))
+    calc(var(--manager-gap) + var(--safe-area-right))
+    calc(var(--manager-gap) + var(--safe-area-bottom))
+    calc(var(--manager-gap) + var(--safe-area-left));
 }
 
 .source-modal {
   width: min(1180px, 100%);
-  height: min(780px, calc(var(--app-visual-height, var(--app-height, 100vh)) - var(--safe-area-top) - var(--safe-area-bottom) - 32px));
-  max-height: min(88vh, calc(var(--app-visual-height, var(--app-height, 100vh)) - var(--safe-area-top) - var(--safe-area-bottom) - 32px));
+  height: min(780px, 100%);
+  max-height: min(88vh, 100%);
   background: var(--color-bg-elevated);
   border-radius: var(--radius-xl);
   display: flex;
@@ -829,14 +834,14 @@ watch(account, (next, previous) => {
 
 @media (max-width: 900px) {
   .modal-container {
+    --manager-gap: 8px;
     align-items: stretch;
-    padding: 8px;
   }
 
   .source-modal {
     width: 100%;
-    height: calc(var(--app-visual-height, var(--app-height, 100vh)) - 16px);
-    max-height: calc(var(--app-visual-height, var(--app-height, 100vh)) - 16px);
+    height: 100%;
+    max-height: 100%;
     border-radius: 24px;
     overflow-y: auto;
   }
@@ -844,9 +849,9 @@ watch(account, (next, previous) => {
   .content-grid {
     display: flex;
     flex-direction: column;
-    overflow: hidden;
-    flex: 1;
-    min-height: 180px;
+    overflow: visible;
+    flex: 0 0 auto;
+    min-height: 0;
     padding-left: 16px;
     padding-right: 16px;
   }
@@ -854,16 +859,17 @@ watch(account, (next, previous) => {
   .editor-slot {
     order: -1;
     min-height: 0;
-    flex: 0 1 auto;
-    max-height: min(52%, 300px);
+    flex: 0 0 auto;
+    height: min(clamp(360px, calc(var(--app-visual-height, var(--app-height, 100vh)) * 0.58), 560px), calc(var(--app-visual-height, var(--app-height, 100vh)) - 64px));
+    max-height: none;
   }
 
-  .editor-collapsed { flex: 0 0 auto; max-height: none; }
+  .editor-collapsed { flex: 0 0 auto; height: auto; max-height: none; }
 
   .source-list-slot {
-    flex: 1;
-    min-height: 64px;
-    max-height: none;
+    flex: 0 0 auto;
+    min-height: 96px;
+    max-height: min(46vh, 460px);
   }
 
   .modal-footer {
@@ -875,11 +881,7 @@ watch(account, (next, previous) => {
 
 @media (max-width: 420px) {
   .modal-container {
-    padding:
-      calc(8px + var(--safe-area-top))
-      calc(8px + var(--safe-area-right))
-      calc(8px + var(--safe-area-bottom))
-      calc(8px + var(--safe-area-left));
+    --manager-gap: 8px;
   }
 
   .source-modal {
