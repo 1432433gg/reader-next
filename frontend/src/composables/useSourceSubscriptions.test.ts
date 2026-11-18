@@ -18,6 +18,38 @@ function setup() {
   return { account, visible, state }
 }
 describe('account subscription state', () => {
+  it('discards delayed import timestamp context after URL edit, preserving unrelated retries', async () => {
+    const { state } = setup()
+    const old = state.captureContext('https://a.example', { name: 'A', existingOnly: true })
+    state.beginEdit({ url: 'https://a.example', name: 'A' })
+    state.editDraft.value!.newUrl = 'https://new.example'
+    expect(await state.saveEdit()).toBe(true)
+    vi.mocked(api.changeSourceSubscriptions).mockClear()
+    expect(await state.markSynced('https://a.example', old)).toBe(false)
+    expect(api.changeSourceSubscriptions).not.toHaveBeenCalled()
+    expect(state.pendingTimestamps.value).toEqual([])
+  })
+  it('keeps editing snapshot across refresh/conflict and only invalidates the changed URL retry', async () => {
+    const { state } = setup()
+    state.beginEdit({ url: 'https://a.example', name: '旧名', lastSyncedAt: 100 })
+    state.editDraft.value!.name = '新名😀'
+    state.editDraft.value!.newUrl = 'https://new.example/?q=保留'
+    await state.refresh()
+    expect(state.editDraft.value!.expectedName).toBe('旧名')
+    expect(state.editDraft.value!.name).toBe('新名😀')
+    vi.mocked(api.changeSourceSubscriptions).mockRejectedValueOnce(new Error('failure'))
+    await state.markSynced('https://a.example', { name: '旧名', existingOnly: true })
+    vi.mocked(api.changeSourceSubscriptions).mockRejectedValueOnce(new Error('failure'))
+    await state.markSynced('https://b.example', { name: '另名', existingOnly: true })
+    vi.mocked(api.changeSourceSubscriptions).mockRejectedValueOnce(new Error('conflict'))
+    expect(await state.saveEdit()).toBe(false)
+    expect(state.editDraft.value!.name).toBe('新名😀')
+    expect(await state.saveEdit()).toBe(true)
+    expect(state.pendingTimestamps.value).toEqual(['https://b.example'])
+    await state.retryTimestamp('https://b.example')
+    expect(vi.mocked(api.changeSourceSubscriptions).mock.calls.at(-1)?.[0]).toEqual({ operation: 'synced', url: 'https://b.example', name: '另名', existingOnly: true })
+    expect(state.editDraft.value).toBe(null)
+  })
   it('retains A after B succeeds, retains both failures, and clears only the URL retried', async () => {
     const { state, account } = setup()
     vi.mocked(api.changeSourceSubscriptions).mockRejectedValueOnce(new Error('A failed'))

@@ -15,31 +15,40 @@
         </header>
 
         <p v-if="!account" role="status">请登录后保存和同步账号订阅。</p>
-        <p v-else class="subscription-account">当前账号：{{ account }}</p>
         <p v-if="error" role="alert">{{ error }} <button type="button" :disabled="loading || busy" @click="$emit('refresh')">重新读取</button></p>
         <p v-for="(url, index) in pendingTimestamps" :key="url" role="status" class="timestamp-retry">书源已保存，订阅 {{ index + 1 }} 时间尚未同步：<span>{{ url }}</span><button type="button" :disabled="busy" @click="$emit('retry-timestamp', url)">重试时间同步</button></p>
         <button v-if="migrationAvailable" type="button" class="action-btn" :disabled="busy" @click="$emit('migrate')">将本机记录同步到当前账号</button>
 
         <div class="remote-form">
+          <label>订阅名称<input :value="remoteName" aria-label="订阅名称" placeholder="可选，最多80个字符" @input="$emit('update:remoteName', ($event.target as HTMLInputElement).value)" /></label>
+          <label>订阅链接
           <input
             :value="remoteUrl"
             type="text"
             placeholder="输入远程书源合集链接"
             @input="$emit('update:remoteUrl', ($event.target as HTMLInputElement).value)"
           />
+          </label>
           <button class="action-btn primary" type="button" @click="$emit('sync')">立即同步</button>
           <button class="action-btn" type="button" :disabled="!account || busy" @click="$emit('save')">保存订阅</button>
         </div>
 
-        <div v-if="subscriptions.length" class="subscription-list">
-          <article v-for="item in subscriptions" :key="item.url" class="subscription-item">
+        <div v-if="displayedSubscriptions.length" class="subscription-list">
+          <article v-for="item in displayedSubscriptions" :key="item.url" class="subscription-item">
             <div class="subscription-main">
+              <strong>{{ item.name || item.url }}</strong>
               <span class="subscription-url">{{ item.url }}</span>
               <span v-if="item.lastSyncedAt" class="subscription-time">上次同步 {{ formatTime(item.lastSyncedAt) }}</span>
             </div>
+            <form v-if="editDraft?.url === item.url" class="subscription-edit" @submit.prevent="$emit('save-edit')">
+              <label>名称<input v-model="editDraft.name" aria-label="修改订阅名称" :disabled="busy" /></label>
+              <label>链接<input v-model="editDraft.newUrl" aria-label="修改订阅链接" :disabled="busy" inputmode="url" /></label>
+              <div><button type="button" class="mini-btn" :disabled="busy" @click="$emit('cancel-edit')">取消</button><button type="submit" class="mini-btn primary" :disabled="busy">保存修改</button></div>
+            </form>
             <div class="subscription-actions">
-              <button class="mini-btn" type="button" :disabled="busy" @click="$emit('sync-subscription', item.url)">同步</button>
-              <button class="mini-btn danger" type="button" :disabled="busy" @click="$emit('remove-subscription', item.url)">删除</button>
+              <button class="mini-btn" type="button" :disabled="busy || !!editDraft" @click="$emit('sync-subscription', item.url)">同步</button>
+              <button class="mini-btn" type="button" :disabled="busy || !!editDraft" @click="$emit('edit-subscription', item)">编辑</button>
+              <button class="mini-btn danger" type="button" :disabled="busy || !!editDraft" @click="$emit('remove-subscription', item.url)">删除</button>
             </div>
           </article>
         </div>
@@ -51,14 +60,19 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
+import type { SubscriptionDraft } from '../../composables/useSourceSubscriptions'
 export type SourceSubscription = {
   url: string
+  name?: string
   lastSyncedAt?: number
 }
 
-defineProps<{
+const props = defineProps<{
   visible: boolean
   remoteUrl: string
+  remoteName?: string
+  editDraft?: SubscriptionDraft | null
   subscriptions: SourceSubscription[]
   account: string | null
   loaded: boolean
@@ -70,6 +84,10 @@ defineProps<{
 }>()
 
 defineEmits<{
+  'update:remoteName': [value: string]
+  'edit-subscription': [source: SourceSubscription]
+  'save-edit': []
+  'cancel-edit': []
   refresh: []
   migrate: []
   'retry-timestamp': [url: string]
@@ -80,6 +98,10 @@ defineEmits<{
   'remove-subscription': [url: string]
   close: []
 }>()
+// A refresh/delete conflict must not make the active draft disappear.
+const displayedSubscriptions = computed(() => props.editDraft && !props.subscriptions.some((item) => item.url === props.editDraft!.url)
+  ? [...props.subscriptions, { url: props.editDraft.url, name: props.editDraft.expectedName || undefined }]
+  : props.subscriptions)
 
 function formatTime(ts: number) {
   return new Date(ts).toLocaleString()
@@ -87,22 +109,42 @@ function formatTime(ts: number) {
 </script>
 
 <style scoped>
+.remote-form, .subscription-edit { display: flex !important; flex-direction: column; gap: 10px; width: 100%; min-width: 0; }
+.remote-form label, .subscription-edit label { display: flex; flex-direction: column; gap: 4px; min-width: 0; font-size: 13px; }
+.remote-form input, .subscription-edit input { width: 100%; min-width: 0; box-sizing: border-box; font-size: 16px; padding: 10px; border: 1px solid var(--color-border); border-radius: 8px; }
+.subscription-item { flex-wrap: wrap; }
+.subscription-edit { flex-basis: 100%; }
+.subscription-list, .subscription-item, .subscription-main { min-width: 0; max-width: 100%; box-sizing: border-box; }
+.subscription-item { flex-shrink: 0; }
+.subscription-main { flex: 1 1 0; }
+@media (max-width: 640px) { .subscription-edit { flex-basis: auto; } .subscription-main { flex: 0 1 auto; width: 100%; } }
+.subscription-main strong { overflow-wrap: anywhere; }
 .timestamp-retry { overflow-wrap: anywhere; }
 .timestamp-retry span { display: block; font-size: 12px; }
 .subscription-backdrop {
+  --subscription-gap: 24px;
   position: fixed;
-  inset: 0;
+  top: var(--viewport-offset-top, 0px);
+  left: var(--viewport-offset-left, 0px);
+  width: var(--app-visual-width, var(--app-width, 100vw));
+  height: var(--app-visual-height, var(--app-height, 100vh));
+  box-sizing: border-box;
   z-index: calc(var(--z-modal) + 1);
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 24px;
+  padding:
+    calc(var(--subscription-gap) + var(--safe-area-top, 0px))
+    calc(var(--subscription-gap) + var(--safe-area-right, 0px))
+    calc(var(--subscription-gap) + var(--safe-area-bottom, 0px))
+    calc(var(--subscription-gap) + var(--safe-area-left, 0px));
   background: rgba(0, 0, 0, 0.28);
 }
 
 .subscription-panel {
   width: min(720px, 100%);
-  max-height: min(78vh, 720px);
+  max-height: min(calc(var(--app-visual-height, var(--app-height, 100vh)) * 0.78), 720px, 100%);
+  box-sizing: border-box;
   display: flex;
   flex-direction: column;
   gap: 14px;
@@ -112,7 +154,10 @@ function formatTime(ts: number) {
   background: var(--color-bg-elevated);
   box-shadow: var(--shadow-xl);
   overflow: auto;
+  overscroll-behavior: contain;
 }
+
+.subscription-panel > * { flex-shrink: 0; }
 
 .subscription-header {
   display: flex;
@@ -253,8 +298,8 @@ function formatTime(ts: number) {
 
 @media (max-width: 640px) {
   .subscription-backdrop {
+    --subscription-gap: 12px;
     align-items: stretch;
-    padding: 12px;
   }
 
   .remote-form,
