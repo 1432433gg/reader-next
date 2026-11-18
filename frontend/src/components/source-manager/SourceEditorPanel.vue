@@ -6,7 +6,7 @@
     <div v-show="expanded" class="editor-content">
     <header class="editor-head">
       <div class="editor-title">
-        <h3>{{ source ? source.bookSourceName : '书源工作区' }}</h3>
+        <h3 v-if="source">{{ source.bookSourceName }}</h3>
         <p>{{ source ? source.bookSourceUrl : '选择一个书源查看详情，或新建书源' }}</p>
       </div>
       <div class="editor-actions">
@@ -136,7 +136,7 @@ const overview = computed(() => getBookSourceOverview(props.source))
 
 <style scoped>
 .workspace-toggle { width: 100%; display: flex; justify-content: space-between; align-items: center; min-height: 42px; padding: 10px 14px; flex: 0 0 auto; text-align: left; font: inherit; font-size: 14px; font-weight: 600; }
-.editor-content { display: flex; flex-direction: column; min-height: 0; flex: 1; overflow: auto; }
+.editor-content { display: flex; flex-direction: column; min-height: 0; flex: 1; overflow: hidden; }
 .editor-panel {
   min-height: 0;
   border: 1px solid var(--color-border-light);
@@ -152,7 +152,8 @@ const overview = computed(() => getBookSourceOverview(props.source))
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
-  padding: 14px 16px;
+  padding: 10px 12px;
+  flex-shrink: 0;
   border-bottom: 1px solid var(--color-border-light);
 }
 
@@ -186,7 +187,8 @@ const overview = computed(() => getBookSourceOverview(props.source))
 .editor-tabs {
   display: flex;
   gap: 8px;
-  padding: 10px 12px;
+  padding: 6px 12px;
+  flex-shrink: 0;
   border-bottom: 1px solid var(--color-border-light);
   background: var(--color-bg);
 }
@@ -212,10 +214,15 @@ const overview = computed(() => getBookSourceOverview(props.source))
   overflow: auto;
 }
 
-/* Keep the draft reachable inside the bounded workspace on short screens. */
 .json-pane {
-  flex: 1 0 auto;
-  min-height: 128px;
+  display: flex;
+  overflow: hidden;
+}
+.json-pane .editor-textarea {
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+  overflow: auto;
 }
 
 .overview-pane,
