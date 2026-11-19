@@ -462,7 +462,7 @@ async function refreshOfflineCacheState() {
     offlineCachedCount.value = 0
     return
   }
-  offlineCachedCount.value = await countBrowserBookCache(store.book.bookUrl).catch(() => 0)
+  offlineCachedCount.value = await countBrowserBookCache(store.book.bookUrl, store.chapters).catch(() => 0)
 }
 
 let refreshOfflineCacheStateTimer: number | null = null
@@ -1583,7 +1583,7 @@ async function openInfo() {
     durChapterTitle: store.currentChapter?.title || store.book.durChapterTitle,
   }
   try {
-    const latest = await getBookInfo(store.book.bookUrl, store.book.origin)
+    const latest = await getBookInfo(store.book.bookUrl, store.book.origin, store.book.bookRequestId)
     bookInfoBook.value = {
       ...store.book,
       ...latest,

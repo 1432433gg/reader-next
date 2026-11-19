@@ -1,0 +1,20 @@
+services:
+  reader:
+    environment:
+      REMOTE_WEBVIEW_URL: http://webview:8050
+    depends_on:
+      webview:
+        condition: service_healthy
+
+  webview:
+    image: ${WEBVIEW_IMAGE:-webview-next:local}
+    restart: unless-stopped
+    init: true
+    shm_size: 256m
+    security_opt:
+      - seccomp=./webview-seccomp.json
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8050/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 5

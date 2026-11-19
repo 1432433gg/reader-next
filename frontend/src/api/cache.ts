@@ -6,6 +6,8 @@ import { appendAuthQueryParams } from '../utils/secureAccess'
  */
 export function cacheBookSSE(params: {
   bookUrl: string
+  bookRequestId?: string
+  bookSourceUrl?: string
   tocUrl?: string
   count?: number
   refresh?: number
@@ -13,6 +15,8 @@ export function cacheBookSSE(params: {
 }) {
   const query = new URLSearchParams()
   query.set('bookUrl', params.bookUrl)
+  if (params.bookRequestId) query.set('bookRequestId', params.bookRequestId)
+  if (params.bookSourceUrl) query.set('bookSourceUrl', params.bookSourceUrl)
   if (params.tocUrl) query.set('tocUrl', params.tocUrl)
   if (params.count) query.set('count', String(params.count))
   if (params.refresh) query.set('refresh', String(params.refresh))

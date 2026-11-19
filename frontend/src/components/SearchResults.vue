@@ -319,6 +319,7 @@ async function handleAddToShelf(book: Book | SearchBook) {
       name: book.name,
       author: book.author,
       bookUrl: book.bookUrl,
+      ...(book.bookRequestId && { bookRequestId: book.bookRequestId }),
       origin: book.origin,
       coverUrl: book.coverUrl,
     })

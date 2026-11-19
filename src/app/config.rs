@@ -10,6 +10,8 @@ pub struct AppConfig {
     pub assets_dir: String,
     pub log_level: String,
     pub request_timeout_secs: u64,
+    #[serde(default)]
+    pub remote_webview_url: Option<String>,
     pub secure: bool,
     pub secure_key: String,
     pub invite_code: String,
@@ -32,6 +34,7 @@ impl Default for AppConfig {
             assets_dir: "storage/assets".to_string(),
             log_level: "info".to_string(),
             request_timeout_secs: 15,
+            remote_webview_url: None,
             secure: false,
             secure_key: "".to_string(),
             invite_code: "".to_string(),

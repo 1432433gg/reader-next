@@ -1,11 +1,12 @@
 use axum::Router;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing_subscriber::EnvFilter;
 
 use crate::api::{self, AppState};
 use crate::app::config;
-use crate::crawler::http_client::HttpClient;
+use crate::crawler::{http_client::HttpClient, remote_webview::RemoteWebView};
 use crate::parser::rule_engine::RuleEngine;
 use crate::service::{
     book_group_service::BookGroupService, book_service::BookService,
@@ -36,7 +37,21 @@ pub async fn run() -> anyhow::Result<()> {
     tracing::debug!("rule engine created");
     let cache = FileCache::new(format!("{}/cache", cfg.storage_dir));
 
-    let book_service = Arc::new(BookService::new(http, parser, cache, &cfg.storage_dir));
+    let mut book_service = BookService::new(http, parser, cache, &cfg.storage_dir);
+    if let Some(url) = cfg
+        .remote_webview_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+    {
+        let webview = RemoteWebView::new(
+            url,
+            Duration::from_secs(cfg.request_timeout_secs),
+            pool.clone(),
+        )?;
+        book_service = book_service.with_remote_webview(webview);
+    }
+    let book_service = Arc::new(book_service);
     let book_source_service = Arc::new(BookSourceService::new(repo, &cfg.storage_dir));
     let local_txt_book_service = Arc::new(LocalTxtBookService::new(&cfg.storage_dir));
     let local_epub_book_service = Arc::new(LocalEpubBookService::new(&cfg.storage_dir));

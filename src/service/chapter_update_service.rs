@@ -446,26 +446,17 @@ impl ChapterUpdateService {
             return BookCheckOutcome::Skipped;
         }
 
-        let toc_url = match book
-            .toc_url
-            .as_deref()
-            .map(str::trim)
-            .filter(|u| !u.is_empty())
+        let (toc_url, toc_request_id) = match self.book_service
+            .resolve_toc_url(user_ns, &source, &repair_encoded_url(&book.book_url), book.book_request_id.as_deref())
+            .await
         {
-            Some(url) => repair_encoded_url(url),
-            None => match self
-                .book_service
-                .get_book_info(user_ns, &source, &repair_encoded_url(&book.book_url))
-                .await
-            {
-                Ok(info) => repair_encoded_url(info.toc_url.as_deref().unwrap_or(&book.book_url)),
-                Err(err) => return BookCheckOutcome::Failed(format!("获取详情失败: {err}")),
-            },
+            Ok(address) => address,
+            Err(err) => return BookCheckOutcome::Failed(format!("获取详情失败: {err}")),
         };
 
         let chapters = match self
             .book_service
-            .get_chapter_list_with_cache(user_ns, &source, &toc_url, true)
+            .get_chapter_list_for_request(user_ns, &source, Some(&book.book_url), &toc_url, toc_request_id.as_deref(), true)
             .await
         {
             Ok(chapters) if !chapters.is_empty() => chapters,

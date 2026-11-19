@@ -6,10 +6,14 @@ pub struct Book {
     pub name: String,
     pub author: String,
     pub book_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub book_request_id: Option<String>,
     pub origin: String,
     pub origin_name: Option<String>,
     pub cover_url: Option<String>,
     pub toc_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub toc_request_id: Option<String>,
     pub charset: Option<String>,
     pub custom_cover_url: Option<String>,
     pub can_update: Option<bool>,

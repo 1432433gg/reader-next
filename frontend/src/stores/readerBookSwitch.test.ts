@@ -63,6 +63,41 @@ afterEach(async () => {
 })
 
 describe('reader book switching', () => {
+  it('uses the selected chapter request for fetches and browser-cache readback', async () => {
+    const selected = { ...first, bookRequestId: 'rendered-book' }
+    const chapter = { ...chaptersFor(first.bookUrl)[0]!, chapterRequestId: 'rendered-chapter' }
+    vi.mocked(getShelfBook).mockResolvedValue(selected)
+    vi.mocked(getChapterList).mockResolvedValue([chapter])
+    vi.mocked(getBrowserCachedChapter).mockResolvedValueOnce(null).mockResolvedValueOnce('rendered offline')
+    const reader = useReaderStore()
+
+    await reader.loadBook(selected)
+    await reader.fetchChapterContent(0, true)
+    expect(getBrowserCachedChapter).toHaveBeenCalledWith(first.bookUrl, chapter.url, chapter.chapterRequestId)
+    expect(getBookContent).toHaveBeenCalledWith(expect.objectContaining({
+      bookUrl: first.bookUrl, chapterUrl: chapter.url, bookRequestId: selected.bookRequestId,
+      chapterRequestId: chapter.chapterRequestId, refresh: 1,
+    }))
+    expect(setBrowserCachedChapter).toHaveBeenCalledWith(expect.objectContaining({ chapterRequestId: chapter.chapterRequestId }))
+    await expect(reader.fetchChapterContent(0)).resolves.toBe('rendered offline')
+    expect(getBookContent).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps the selected request when the shelf has a different route for the same book URL', async () => {
+    vi.mocked(getShelfBook).mockResolvedValueOnce({
+      ...first, bookRequestId: 'saved-render', tocUrl: first.bookUrl, tocRequestId: 'saved-catalog', durChapterIndex: 1,
+    })
+    const store = useReaderStore()
+
+    await store.loadBook({ ...first, bookRequestId: 'http' })
+
+    expect(store.book?.bookRequestId).toBe('http')
+    expect(store.currentIndex).toBe(1)
+    expect(getChapterList).toHaveBeenCalledWith({
+      bookUrl: first.bookUrl, bookRequestId: 'http', bookSourceUrl: first.origin, tocUrl: undefined,
+    })
+  })
+
   it('selects the new book and clears the previous text before waiting for the server', async () => {
     const store = useReaderStore()
     await store.loadBook(first)

@@ -34,6 +34,8 @@ docker compose -f docker/compose.yml up -d
 
 数据库、上传的书和缓存都在容器的 `/app/storage`，一定要挂载 volume 或宿主机目录，不然删容器就丢数据。
 
+动态书源可按需启用独立 Chromium 服务，见[可选 WebView 渲染服务](docs/webview-next.md)。
+
 ## 要求
 
 - Docker 部署：只要 Docker（Compose 可选）。
@@ -64,6 +66,7 @@ docker compose -f docker/compose.yml up -d
 | `USER_BOOK_LIMIT` | `2000` | 每个账号最多几本书 |
 | `LOG_LEVEL` | `info` | 日志级别，`off` 不输出 |
 | `REQUEST_TIMEOUT_SECS` | `15` | 请求书源的超时（秒） |
+| `REMOTE_WEBVIEW_URL` | 空 | 可选的独立 WebView 渲染服务地址 |
 | `CHAPTER_UPDATE_INTERVAL_HOURS` | `24` | 新章节自动检查间隔（小时），`0` 关闭 |
 | `CHAPTER_UPDATE_CONCURRENCY` | `3` | 新章节检查同时请求的书源数 |
 

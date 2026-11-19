@@ -95,6 +95,8 @@ struct ExploreBookGlobalResponse {
 }
 #[derive(Debug, Deserialize)]
 pub struct BookInfoRequest {
+    #[serde(rename = "bookRequestId")]
+    book_request_id: Option<String>,
     pub url: Option<String>,
     #[serde(rename = "bookSourceUrl", alias = "origin")]
     pub book_source_url: Option<String>,
@@ -104,6 +106,10 @@ pub struct BookInfoRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct ChapterListRequest {
+    #[serde(rename = "bookRequestId")]
+    book_request_id: Option<String>,
+    #[serde(rename = "tocRequestId")]
+    toc_request_id: Option<String>,
     #[serde(rename = "tocUrl")]
     pub toc_url: Option<String>,
     #[serde(rename = "bookUrl", alias = "url")]
@@ -117,6 +123,10 @@ pub struct ChapterListRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct BookContentRequest {
+    #[serde(rename = "chapterRequestId")]
+    chapter_request_id: Option<String>,
+    #[serde(rename = "bookRequestId")]
+    book_request_id: Option<String>,
     #[serde(rename = "bookUrl")]
     pub book_url: Option<String>,
     #[serde(rename = "chapterUrl", alias = "url", alias = "href")]
@@ -167,6 +177,10 @@ pub struct CoverQuery {
 
 #[derive(Debug, Deserialize)]
 pub struct CacheBookRequest {
+    #[serde(rename = "bookRequestId")]
+    book_request_id: Option<String>,
+    #[serde(rename = "bookSourceUrl")]
+    book_source_url: Option<String>,
     url: Option<String>,
     #[serde(rename = "bookUrl")]
     book_url: Option<String>,
@@ -238,6 +252,8 @@ pub struct AvailableBookSourceResponse {
 
 #[derive(Debug, Deserialize, Default)]
 pub struct SetBookSourceRequest {
+    #[serde(rename = "bookRequestId")]
+    book_request_id: Option<String>,
     #[serde(rename = "bookUrl", alias = "url")]
     book_url: Option<String>,
     #[serde(rename = "newUrl")]
@@ -849,6 +865,7 @@ pub async fn get_book_info(
         } else if let Ok(s) = std::str::from_utf8(&body) {
             for (k, v) in url::form_urlencoded::parse(s.as_bytes()) {
                 match k.as_ref() {
+                    "bookRequestId" => req.book_request_id = Some(v.into_owned()),
                     "url" => req.url = Some(v.into_owned()),
                     "bookSourceUrl" | "origin" => req.book_source_url = Some(v.into_owned()),
                     _ => {}
@@ -927,7 +944,7 @@ pub async fn get_book_info(
     .await?;
     let book = state
         .book_service
-        .get_book_info(&user_ns, &source, &url)
+        .get_book_info_for_request(&user_ns, &source, &url, req.book_request_id.as_deref())
         .await?;
     Ok(Json(ApiResponse::ok(
         serde_json::to_value(book).unwrap_or_default(),
@@ -953,6 +970,8 @@ pub async fn get_chapter_list(
         } else if let Ok(s) = std::str::from_utf8(&body) {
             for (k, v) in url::form_urlencoded::parse(s.as_bytes()) {
                 match k.as_ref() {
+                    "bookRequestId" => req.book_request_id = Some(v.into_owned()),
+                    "tocRequestId" => req.toc_request_id = Some(v.into_owned()),
                     "tocUrl" => req.toc_url = Some(v.into_owned()),
                     "bookUrl" | "url" => req.book_url = Some(v.into_owned()),
                     "bookSourceUrl" | "origin" => req.book_source_url = Some(v.into_owned()),
@@ -1054,13 +1073,13 @@ pub async fn get_chapter_list(
         req.book_url.as_deref().or(req.toc_url.as_deref()),
     )
     .await?;
-    let toc_url = if let Some(u) = req.toc_url.filter(|url| !url.trim().is_empty()) {
-        repair_encoded_url(&u)
-    } else if let Some(book_url) = req.book_url {
+    let (toc_url, toc_request_id) = if let Some(u) = req.toc_url.filter(|url| !url.trim().is_empty()) {
+        (repair_encoded_url(&u), req.toc_request_id)
+    } else if let Some(book_url) = req.book_url.as_deref() {
         let book_url = repair_encoded_url(&book_url);
         state
             .book_service
-            .resolve_toc_url(&user_ns, &source, &book_url)
+            .resolve_toc_url(&user_ns, &source, &book_url, req.book_request_id.as_deref())
             .await?
     } else {
         return Err(AppError::BadRequest(
@@ -1070,7 +1089,7 @@ pub async fn get_chapter_list(
 
     let chapters = state
         .book_service
-        .get_chapter_list_with_cache(&user_ns, &source, &toc_url, do_refresh)
+        .get_chapter_list_for_request(&user_ns, &source, req.book_url.as_deref(), &toc_url, toc_request_id.as_deref(), do_refresh)
         .await?;
 
     Ok(Json(ApiResponse::ok(
@@ -1094,6 +1113,8 @@ pub async fn get_book_content(
     if !body.is_empty() {
         if let Ok(v) = serde_json::from_slice::<BookContentRequest>(&body) {
             // Merge with query params
+            req.book_request_id = req.book_request_id.or(v.book_request_id);
+            req.chapter_request_id = req.chapter_request_id.or(v.chapter_request_id);
             if req.book_url.is_none() {
                 req.book_url = v.book_url;
             }
@@ -1115,6 +1136,8 @@ pub async fn get_book_content(
         } else if let Ok(s) = std::str::from_utf8(&body) {
             for (k, v) in url::form_urlencoded::parse(s.as_bytes()) {
                 match k.as_ref() {
+                    "chapterRequestId" => req.chapter_request_id = Some(v.into_owned()),
+                    "bookRequestId" => req.book_request_id = Some(v.into_owned()),
                     "bookUrl" => req.book_url = Some(v.into_owned()),
                     "chapterUrl" | "href" => req.chapter_url = Some(v.into_owned()),
                     "bookSourceUrl" | "origin" => req.book_source_url = Some(v.into_owned()),
@@ -1234,14 +1257,14 @@ pub async fn get_book_content(
     }
 
     // Determine book_url and chapter_url
-    let (book_url, chapter_url) = if let Some(url) = &req.chapter_url {
+    let (book_url, chapter_url, mut chapter_request_id) = if let Some(url) = &req.chapter_url {
         // Check if url looks like a book URL (not a chapter URL) and we have an index
         if let Some(book_url) = req
             .book_url
             .as_deref()
             .filter(|value| !value.trim().is_empty())
         {
-            (book_url.to_string(), url.clone())
+            (book_url.to_string(), url.clone(), req.chapter_request_id)
         } else if req.index.is_some() && !url.contains("/read/") && !url.contains("/chapter/") {
             // url is bookUrl, need to get chapter from index
             let source = resolve_book_source(
@@ -1252,14 +1275,14 @@ pub async fn get_book_content(
                 Some(url),
             )
             .await?;
-            let toc_url = state
+            let (toc_url, toc_request_id) = state
                 .book_service
-                .resolve_toc_url(&user_ns, &source, url)
+                .resolve_toc_url(&user_ns, &source, url, req.book_request_id.as_deref())
                 .await?;
 
             let mut chapters = state
                 .book_service
-                .get_chapter_list_with_cache(&user_ns, &source, &toc_url, do_refresh)
+                .get_chapter_list_for_request(&user_ns, &source, Some(url), &toc_url, toc_request_id.as_deref(), do_refresh)
                 .await?;
             let idx = req.index.unwrap() as usize;
 
@@ -1274,7 +1297,7 @@ pub async fn get_book_content(
                 );
                 chapters = state
                     .book_service
-                    .get_chapter_list_with_cache(&user_ns, &source, &toc_url, true)
+                    .get_chapter_list_for_request(&user_ns, &source, Some(url), &toc_url, toc_request_id.as_deref(), true)
                     .await?;
 
                 if idx >= chapters.len() {
@@ -1284,7 +1307,7 @@ pub async fn get_book_content(
                     )));
                 }
             }
-            (url.clone(), chapters[idx].url.clone())
+            (url.clone(), chapters[idx].url.clone(), chapters[idx].chapter_request_id.clone())
         } else {
             // url is chapterUrl, try to find book_url from shelf
             let book_url = if let Ok(Some(shelf_book)) = state
@@ -1296,7 +1319,7 @@ pub async fn get_book_content(
             } else {
                 url.clone() // fallback to using chapter url as book key
             };
-            (book_url, url.clone())
+            (book_url, url.clone(), req.chapter_request_id)
         }
     } else {
         return Err(AppError::BadRequest("chapterUrl required".to_string()));
@@ -1311,17 +1334,18 @@ pub async fn get_book_content(
     )
     .await?;
 
-    // If refresh is requested, delete this chapter's cache before fetching
-    if do_refresh {
-        let _ = state
-            .book_service
-            .delete_chapter_content_cache(&user_ns, &book_url, &chapter_url)
-            .await;
+    // Clients can send the selected chapter ID directly. A selected book alone
+    // resolves through that book's catalog, never through a shared chapter URL map.
+    if chapter_request_id.is_none() && req.book_url.is_some() {
+        if let Some(book_request_id) = req.book_request_id.as_deref() {
+            chapter_request_id = state.book_service
+                .chapter_request_for_book(&user_ns, &source, &book_url, book_request_id, &chapter_url)
+                .await?;
+        }
     }
-
     let content = state
         .book_service
-        .get_content(&user_ns, &book_url, &source, &chapter_url)
+        .get_content_for_request(&user_ns, &book_url, &source, &chapter_url, chapter_request_id.as_deref(), do_refresh)
         .await?;
     Ok(Json(ApiResponse::ok(serde_json::Value::String(content))))
 }
@@ -1369,42 +1393,10 @@ pub async fn delete_book_cache(
         .or(req.url)
         .ok_or_else(|| AppError::BadRequest("bookUrl required".to_string()))?;
 
-    let mut deleted_chapter_list = false;
-
-    // Delete all chapter content cache for this book
-    let deleted_content = state
+    let (deleted_content, deleted_chapter_list) = state
         .book_service
-        .delete_book_cache(&user_ns, &book_url)
+        .clear_book_cache(&user_ns, &book_url, None)
         .await?;
-
-    // Try to delete chapter list cache by shelf book toc_url first, then book_url fallback
-    let mut candidate_toc_urls = vec![book_url.clone()];
-    if let Ok(Some(shelf_book)) = state.book_service.get_shelf_book(&user_ns, &book_url).await {
-        if let Some(toc_url) = shelf_book.toc_url {
-            if !candidate_toc_urls.contains(&toc_url) {
-                candidate_toc_urls.push(toc_url);
-            }
-        }
-    }
-
-    for toc_url in candidate_toc_urls {
-        if state
-            .book_service
-            .chapter_list_cache_exists(&user_ns, &toc_url)
-            .await
-        {
-            state
-                .book_service
-                .delete_chapter_list_cache(&user_ns, &toc_url)
-                .await?;
-            deleted_chapter_list = true;
-        }
-    }
-
-    let _ = state
-        .book_service
-        .delete_book_sources_cache(&user_ns, &book_url)
-        .await;
 
     Ok(Json(ApiResponse::ok(serde_json::json!({
         "deleted": true,
@@ -1631,7 +1623,7 @@ pub async fn save_book(
         {
             if let Ok(info) = state
                 .book_service
-                .get_book_info(&user_ns, &source, &book.book_url)
+                .get_book_info_for_request(&user_ns, &source, &book.book_url, book.book_request_id.as_deref())
                 .await
             {
                 merge_book(&mut book, info);
@@ -1734,6 +1726,8 @@ pub async fn set_book_source(
     updated.origin = new_source.book_source_url.clone();
     updated.origin_name = Some(new_source.book_source_name.clone());
     updated.toc_url = None;
+    updated.toc_request_id = None;
+    updated.book_request_id = None;
 
     if let Some(candidates) = state
         .book_service
@@ -1742,7 +1736,7 @@ pub async fn set_book_source(
     {
         if let Some(candidate) = candidates
             .into_iter()
-            .find(|item| item.book_url == new_book_url)
+            .find(|item| item.book_url == new_book_url && item.origin == new_source.book_source_url)
         {
             if !candidate.name.trim().is_empty() {
                 updated.name = candidate.name;
@@ -1752,14 +1746,16 @@ pub async fn set_book_source(
             }
             updated.cover_url = candidate.cover_url.or(updated.cover_url);
             updated.intro = candidate.intro.or(updated.intro);
+            updated.book_request_id = candidate.book_request_id;
             updated.kind = candidate.kind.or(updated.kind);
             updated.latest_chapter_title = candidate.last_chapter.or(updated.latest_chapter_title);
         }
     }
 
+    updated.book_request_id = req.book_request_id.or(updated.book_request_id);
     match state
         .book_service
-        .get_book_info(&user_ns, &new_source, &new_book_url)
+        .get_book_info_for_request(&user_ns, &new_source, &new_book_url, updated.book_request_id.as_deref())
         .await
     {
         Ok(info) => merge_book(&mut updated, info),
@@ -1903,7 +1899,7 @@ pub async fn save_book_progress(
     ) {
         if let Ok(chapters) = state
             .book_service
-            .get_chapter_list(&user_ns, &source, &toc_url)
+            .get_chapter_list_for_request(&user_ns, &source, Some(&shelf_book.book_url), &toc_url, shelf_book.toc_request_id.as_deref(), false)
             .await
         {
             if index >= 0 && (index as usize) < chapters.len() {
@@ -1982,7 +1978,7 @@ pub async fn get_shelf_book_with_cache_info(
         }
 
         let candidate_toc_urls = if let Some(toc_url) = &book.toc_url {
-            vec![toc_url.clone(), book.book_url.clone()]
+            vec![crate::service::book_service::request_cache_key(toc_url, book.toc_request_id.as_deref()), book.book_url.clone()]
         } else {
             vec![book.book_url.clone()]
         };
@@ -1991,15 +1987,10 @@ pub async fn get_shelf_book_with_cache_info(
         for toc_url in candidate_toc_urls {
             if let Ok(Some(chapters)) = state
                 .book_service
-                .load_chapter_list_cache(&user_ns, &toc_url)
+                .load_book_chapter_list_cache(&user_ns, &book.book_url, &toc_url)
                 .await
             {
-                let urls: Vec<String> = chapters.into_iter().map(|c| c.url).collect();
-                cached_count = state
-                    .book_service
-                    .cached_chapter_count(&user_ns, &book.book_url, &urls)
-                    .await
-                    .unwrap_or(0);
+                cached_count = state.book_service.count_cached_catalog(&user_ns, &book.book_url, &chapters).await;
                 found_cached_chapters = true;
                 break;
             }
@@ -2029,20 +2020,12 @@ pub async fn get_shelf_book_with_cache_info(
                     .get(&user_ns_clone, &book.origin)
                     .await
                 {
-                    let mut toc_url = book.toc_url.clone();
-                    if toc_url.is_none() {
-                        if let Ok(info) = state_clone
-                            .book_service
-                            .get_book_info(&user_ns_clone, &source, &book.book_url)
-                            .await
-                        {
-                            toc_url = info.toc_url.or(Some(book.book_url.clone()));
-                        }
-                    }
-                    if let Some(toc_url) = toc_url.or(Some(book.book_url.clone())) {
-                        let _ = state_clone
-                            .book_service
-                            .get_chapter_list(&user_ns_clone, &source, &toc_url)
+                    if let Ok((toc_url, request_id)) = state_clone.book_service
+                        .resolve_toc_url(&user_ns_clone, &source, &book.book_url, book.book_request_id.as_deref())
+                        .await
+                    {
+                        let _ = state_clone.book_service
+                            .get_chapter_list_for_request(&user_ns_clone, &source, Some(&book.book_url), &toc_url, request_id.as_deref(), false)
                             .await;
                     }
                 }
@@ -2137,17 +2120,20 @@ pub async fn cache_book_sse(
     if book.origin.trim().is_empty() {
         return Err(AppError::BadRequest("未配置书源".to_string()));
     }
+    let source_url = req.book_source_url.as_deref().unwrap_or(&book.origin);
     let source = state
         .book_source_service
-        .get(&user_ns, &book.origin)
+        .get(&user_ns, source_url)
         .await?
         .ok_or_else(|| AppError::BadRequest("书源不存在".to_string()))?;
 
-    // The root TOC url for the book (for fetching the full list)
-    let root_toc_url = book
-        .toc_url
-        .clone()
-        .unwrap_or_else(|| book.book_url.clone());
+    let (root_toc_url, toc_request_id) = if source_url != book.origin
+        || req.book_request_id.as_ref().is_some_and(|id| book.book_request_id.as_ref() != Some(id))
+    {
+        state.book_service.resolve_toc_url(&user_ns, &source, &book_url, req.book_request_id.as_deref()).await?
+    } else {
+        (book.toc_url.clone().unwrap_or_else(|| book.book_url.clone()), book.toc_request_id.clone())
+    };
 
     // The starting chapter URL for caching (from query params)
     let start_ch_url = req.toc_url.clone();
@@ -2155,7 +2141,7 @@ pub async fn cache_book_sse(
 
     let mut chapters = state
         .book_service
-        .get_chapter_list(&user_ns, &source, &root_toc_url)
+        .get_chapter_list_for_request(&user_ns, &source, Some(&book.book_url), &root_toc_url, toc_request_id.as_deref(), false)
         .await?;
 
     // If a starting URL is provided, narrow down the list
@@ -2187,7 +2173,7 @@ pub async fn cache_book_sse(
             for ch in &chapters {
                 if state_clone
                     .book_service
-                    .is_chapter_cached(&user_ns_clone, &book_url_clone, &ch.url)
+                    .is_chapter_cached_for_request(&user_ns_clone, &book_url_clone, &ch.url, ch.chapter_request_id.as_deref())
                     .await
                 {
                     cached_count += 1;
@@ -2215,7 +2201,7 @@ pub async fn cache_book_sse(
             let already_cached = !refresh
                 && state_clone
                     .book_service
-                    .is_chapter_cached(&user_ns_clone, &book_url_clone, &ch.url)
+                    .is_chapter_cached_for_request(&user_ns_clone, &book_url_clone, &ch.url, ch.chapter_request_id.as_deref())
                     .await;
             if already_cached {
                 continue;
@@ -2229,13 +2215,12 @@ pub async fn cache_book_sse(
             };
             let svc = state_clone.book_service.clone();
             let src = source_clone.clone();
-            let url = ch.url.clone();
             let b_url = book_url_clone.clone();
             let refresh_flag = refresh;
             let u_ns = user_ns_clone.clone();
             tasks.push(tokio::spawn(async move {
                 let _permit = permit;
-                svc.cache_chapter(&u_ns, &b_url, &src, &url, refresh_flag)
+                svc.get_content_for_request(&u_ns, &b_url, &src, &ch.url, ch.chapter_request_id.as_deref(), refresh_flag)
                     .await
             }));
         }
@@ -3177,6 +3162,10 @@ fn merge_book(target: &mut Book, info: Book) {
     }
     if target.toc_url.is_none() {
         target.toc_url = info.toc_url;
+        target.toc_request_id = info.toc_request_id;
+    }
+    if target.book_request_id.is_none() {
+        target.book_request_id = info.book_request_id;
     }
     if target.intro.is_none() {
         target.intro = info.intro;

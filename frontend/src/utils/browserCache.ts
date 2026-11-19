@@ -1,3 +1,5 @@
+import type { BookChapter } from '../types'
+
 const DB_NAME = 'reader-browser-cache'
 const DB_VERSION = 1
 const STORE_NAME = 'chapters'
@@ -20,7 +22,10 @@ export interface BrowserBookCacheSummary {
   updatedAt: number
 }
 
-function cacheKey(bookUrl: string, chapterUrl: string) {
+function cacheKey(bookUrl: string, chapterUrl: string, requestId?: string) {
+  if (requestId && requestId !== 'http') {
+    return '\0' + JSON.stringify([bookUrl, chapterUrl, requestId])
+  }
   return `${bookUrl}::${chapterUrl}`
 }
 
@@ -82,9 +87,9 @@ function requestToPromise<T>(request: IDBRequest<T>): Promise<T> {
   })
 }
 
-export async function getBrowserCachedChapter(bookUrl: string, chapterUrl: string) {
+export async function getBrowserCachedChapter(bookUrl: string, chapterUrl: string, chapterRequestId?: string) {
   return withStore('readonly', async (store) => {
-    const result = await requestToPromise(store.get(cacheKey(bookUrl, chapterUrl)))
+    const result = await requestToPromise(store.get(cacheKey(bookUrl, chapterUrl, chapterRequestId)))
     const record = result as BrowserChapterCacheRecord | undefined
     return record?.content || null
   })
@@ -93,12 +98,13 @@ export async function getBrowserCachedChapter(bookUrl: string, chapterUrl: strin
 export async function setBrowserCachedChapter(params: {
   bookUrl: string
   chapterUrl: string
+  chapterRequestId?: string
   chapterTitle?: string
   content: string
 }) {
   return withStore('readwrite', async (store) => {
     const record: BrowserChapterCacheRecord = {
-      key: cacheKey(params.bookUrl, params.chapterUrl),
+      key: cacheKey(params.bookUrl, params.chapterUrl, params.chapterRequestId),
       bookUrl: params.bookUrl,
       chapterUrl: params.chapterUrl,
       chapterTitle: params.chapterTitle || '',
@@ -118,16 +124,19 @@ export async function deleteBrowserBookCache(bookUrl: string) {
   })
 }
 
-export async function countBrowserBookCache(bookUrl: string) {
-  const summaries = await listBrowserCacheSummary()
-  return summaries.find((item) => item.bookUrl === bookUrl)?.cachedChapterCount || 0
+export async function countBrowserBookCache(bookUrl: string, chapters?: readonly BookChapter[]) {
+  return (await listBrowserCachedChapterUrls(bookUrl, chapters)).size
 }
 
-export async function listBrowserCachedChapterUrls(bookUrl: string) {
+export async function listBrowserCachedChapterUrls(bookUrl: string, chapters?: readonly BookChapter[]) {
   return withStore('readonly', async (store) => {
     const index = store.index('bookUrl')
-    const records = await requestToPromise(index.getAll(IDBKeyRange.only(bookUrl)))
-    return new Set((records as BrowserChapterCacheRecord[]).map((record) => record.chapterUrl).filter(Boolean))
+    const records = await requestToPromise(index.getAll(IDBKeyRange.only(bookUrl))) as BrowserChapterCacheRecord[]
+    if (!chapters) return new Set(records.map((record) => record.chapterUrl).filter(Boolean))
+    const keys = new Set(records.map((record) => record.key))
+    return new Set(chapters
+      .filter((chapter) => keys.has(cacheKey(bookUrl, chapter.url, chapter.chapterRequestId)))
+      .map((chapter) => chapter.url))
   })
 }
 
@@ -135,6 +144,7 @@ export async function listBrowserCacheSummary(): Promise<BrowserBookCacheSummary
   return withStore('readonly', async (store) => {
     const records = await requestToPromise(store.getAll())
     const summaryMap = new Map<string, BrowserBookCacheSummary>()
+    const seen = new Set<string>()
 
     ;(records as BrowserChapterCacheRecord[]).forEach((record) => {
       const current = summaryMap.get(record.bookUrl) || {
@@ -143,7 +153,11 @@ export async function listBrowserCacheSummary(): Promise<BrowserBookCacheSummary
         bytes: 0,
         updatedAt: 0,
       }
-      current.cachedChapterCount += 1
+      const identity = JSON.stringify([record.bookUrl, record.chapterUrl])
+      if (!seen.has(identity)) {
+        seen.add(identity)
+        current.cachedChapterCount += 1
+      }
       current.bytes += record.size || 0
       current.updatedAt = Math.max(current.updatedAt, record.updatedAt || 0)
       summaryMap.set(record.bookUrl, current)

@@ -11,6 +11,9 @@ export interface CacheProgress {
 export async function resolveBookChapters(book: Book) {
   return getChapterList({
     bookUrl: book.bookUrl,
+    ...(book.bookRequestId && { bookRequestId: book.bookRequestId }),
+    ...(book.tocUrl && { tocUrl: book.tocUrl }),
+    ...(book.tocRequestId && { tocRequestId: book.tocRequestId }),
     bookSourceUrl: book.origin,
   })
 }
@@ -35,11 +38,14 @@ export async function cacheBookToBrowser(params: {
     const content = await getBookContent({
       bookUrl: params.book.bookUrl,
       chapterUrl: chapter.url,
+      ...(chapter.chapterRequestId && { chapterRequestId: chapter.chapterRequestId }),
       bookSourceUrl: params.book.origin,
+      ...(params.book.bookRequestId && { bookRequestId: params.book.bookRequestId }),
     })
     await setBrowserCachedChapter({
       bookUrl: params.book.bookUrl,
       chapterUrl: chapter.url,
+      ...(chapter.chapterRequestId && { chapterRequestId: chapter.chapterRequestId }),
       chapterTitle: chapter.title,
       content,
     })

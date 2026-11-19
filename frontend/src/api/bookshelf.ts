@@ -74,13 +74,15 @@ export function deleteBooks(books: Partial<Book>[]) {
   return http.post<{ deleted: number }>('/deleteBooks', books).then((r) => r.data)
 }
 
-export function getBookInfo(url: string, origin?: string) {
-  return http.post<Book>('/getBookInfo', { url, bookSourceUrl: origin }).then((r) => r.data)
+export function getBookInfo(url: string, origin?: string, bookRequestId?: string) {
+  return http.post<Book>('/getBookInfo', { url, bookSourceUrl: origin, bookRequestId }).then((r) => r.data)
 }
 
 export function getChapterList(params: {
   bookUrl?: string
   tocUrl?: string
+  bookRequestId?: string
+  tocRequestId?: string
   bookSourceUrl?: string
   refresh?: number
 }) {
@@ -90,6 +92,8 @@ export function getChapterList(params: {
 export function getBookContent(params: {
   bookUrl?: string
   chapterUrl?: string
+  chapterRequestId?: string
+  bookRequestId?: string
   bookSourceUrl?: string
   index?: number
   refresh?: number
@@ -129,6 +133,7 @@ export function saveBookGroupId(bookUrl: string, groupId: number) {
 export function setBookSource(params: {
   bookUrl: string
   newUrl: string
+  bookRequestId?: string
   bookSourceUrl: string
 }) {
   return http.post<Book>('/setBookSource', params).then((r) => r.data)

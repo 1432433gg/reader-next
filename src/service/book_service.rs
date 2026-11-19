@@ -1,7 +1,8 @@
 use crate::crawler::{
     fetcher::{fetch, FetchResponse, RequestSpec, StrResponse},
     http_client::HttpClient,
-    url_analyzer::analyze_url,
+    remote_webview::{LinkRole, RemoteWebView},
+    url_analyzer::{analyze_url, webview_link, webview_link_identity},
 };
 use crate::error::error::AppError;
 use crate::model::{
@@ -26,10 +27,12 @@ use tokio::time::{sleep, Duration, Instant};
 #[derive(Clone)]
 pub struct BookService {
     http: HttpClient,
+    remote_webview: Option<RemoteWebView>,
     parser: RuleEngine,
     cache: FileCache,
     storage_dir: PathBuf,
     bookshelf_write_lock: Arc<Mutex<()>>,
+    cache_lock: Arc<Mutex<()>>,
     source_cookies: Arc<RwLock<HashMap<String, String>>>,
     rate_states: Arc<RwLock<HashMap<String, RateState>>>,
 }
@@ -60,13 +63,20 @@ impl BookService {
         let storage_dir = PathBuf::from(storage_dir);
         Self {
             http,
+            remote_webview: None,
             parser,
             cache,
             storage_dir,
             bookshelf_write_lock: Arc::new(Mutex::new(())),
+            cache_lock: Arc::new(Mutex::new(())),
             source_cookies: Arc::new(RwLock::new(HashMap::new())),
             rate_states: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    pub fn with_remote_webview(mut self, remote_webview: RemoteWebView) -> Self {
+        self.remote_webview = Some(remote_webview);
+        self
     }
 
     pub fn http_client(&self) -> &reqwest::Client {
@@ -81,9 +91,19 @@ impl BookService {
         &self,
         user_ns: &str,
         source: &BookSource,
-        headers: &mut Vec<(String, String)>,
+        spec: &mut RequestSpec,
     ) {
+        if spec.web_view && self.remote_webview.is_some() {
+            let same_origin = url::Url::parse(&source.book_source_url)
+                .ok()
+                .zip(url::Url::parse(&spec.url).ok())
+                .is_some_and(|(source, target)| source.origin() == target.origin());
+            if !same_origin {
+                return;
+            }
+        }
         let key = self.source_cookie_key(user_ns, &source.book_source_url);
+        let headers = &mut spec.headers;
         if let Some(cookie) = self.source_cookies.read().await.get(&key).cloned() {
             if !headers
                 .iter()
@@ -111,24 +131,63 @@ impl BookService {
         user_ns: &str,
         source: &BookSource,
         url_rule: &str,
-        base_url: &str,
     ) -> Result<FetchResponse, AppError> {
-        let mut spec = analyze_url(url_rule, "", 1, base_url, source)?;
-        self.apply_source_cookie(user_ns, source, &mut spec.headers)
+        let mut spec = analyze_url(url_rule, "", 1, &source.book_source_url, source)?;
+        self.apply_source_cookie(user_ns, source, &mut spec)
             .await;
-        let res = self.fetch_with_rate(source, spec).await?;
-        Ok(apply_login_check_js(source, res))
+        self.fetch_with_rate(source, spec, true).await
     }
 
     async fn fetch_with_rate(
         &self,
         source: &BookSource,
         spec: RequestSpec,
-    ) -> anyhow::Result<FetchResponse> {
+        reading: bool,
+    ) -> Result<FetchResponse, AppError> {
+        let renderer = self
+            .remote_webview
+            .as_ref()
+            .filter(|_| reading && spec.web_view);
         self.wait_for_rate(source).await;
-        let result = fetch(&self.http, spec).await;
+        let result = if let Some(webview) = renderer {
+            webview
+                .fetch(&spec)
+                .await
+                .map_err(|error| AppError::Upstream(error.to_string()))
+        } else {
+            fetch(&self.http, spec).await.map_err(AppError::Internal)
+        };
         self.finish_rate(source).await;
-        result
+        let response = result?;
+        let response = if reading {
+            apply_login_check_js(source, response)
+        } else {
+            response
+        };
+        if renderer.is_some() && !response.is_successful {
+            return Err(AppError::Upstream(format!(
+                "WebView target returned HTTP {}",
+                response.status
+            )));
+        }
+        Ok(response)
+    }
+
+    async fn remember_search_links(
+        &self,
+        user_ns: &str,
+        source: &BookSource,
+        books: &mut [SearchBook],
+    ) -> Result<(), AppError> {
+        for book in books {
+            if let Some(webview) = &self.remote_webview {
+                book.book_request_id = Some(webview
+                    .remember_request(user_ns, &source.book_source_url, LinkRole::Book, &book.book_url)
+                    .await?.unwrap_or_else(|| "http".to_owned()));
+            }
+            strip_render_options(&mut book.book_url);
+        }
+        Ok(())
     }
 
     async fn wait_for_rate(&self, source: &BookSource) {
@@ -224,30 +283,20 @@ impl BookService {
             .search_url
             .clone()
             .ok_or_else(|| AppError::BadRequest("missing search_url".to_string()))?;
-        tracing::info!(
-            "searching book from {}: key={}, page={}, url={}",
-            source.book_source_name,
-            key,
-            page,
-            search_url
-        );
+        tracing::info!(source = %source.book_source_name, page, "searching books");
         let mut spec = analyze_url(&search_url, key, page, &source.book_source_url, source)
             .map_err(|e| {
                 tracing::error!("analyze_url failed: {:?}", e);
                 e
             })?;
 
-        self.apply_source_cookie(user_ns, source, &mut spec.headers)
+        self.apply_source_cookie(user_ns, source, &mut spec)
             .await;
 
-        tracing::debug!("search_book fetched spec: {:?}", spec);
-        let res = self.fetch_with_rate(source, spec).await.map_err(|e| {
-            tracing::error!("fetch failed: {:?}", e);
-            e
-        })?;
-        let res = apply_login_check_js(source, res);
+        let res = self.fetch_with_rate(source, spec, true).await?;
         tracing::debug!("fetch success, body length: {}", res.body.len());
-        let books = self.parser.search_books(source, &res.body, &res.url);
+        let mut books = self.parser.search_books(source, &res.body, &res.url);
+        self.remember_search_links(user_ns, source, &mut books).await?;
         tracing::info!("found {} books", books.len());
         Ok(books)
     }
@@ -264,11 +313,13 @@ impl BookService {
         }
         let mut spec = analyze_url(rule_find_url, "", page, &source.book_source_url, source)?;
 
-        self.apply_source_cookie(user_ns, source, &mut spec.headers)
+        self.apply_source_cookie(user_ns, source, &mut spec)
             .await;
 
-        let res = apply_login_check_js(source, self.fetch_with_rate(source, spec).await?);
-        Ok(self.parser.explore_books(source, &res.body, &res.url))
+        let res = self.fetch_with_rate(source, spec, true).await?;
+        let mut books = self.parser.explore_books(source, &res.body, &res.url);
+        self.remember_search_links(user_ns, source, &mut books).await?;
+        Ok(books)
     }
 
     pub fn explore_kinds(&self, source: &BookSource) -> Result<Vec<ExploreKind>, AppError> {
@@ -362,7 +413,7 @@ impl BookService {
 
         let spec = analyze_url(&login_url, "", 1, &source.book_source_url, source)?;
 
-        let res = self.fetch_with_rate(source, spec).await?;
+        let res = self.fetch_with_rate(source, spec, false).await?;
         let check_result = if let Some(login_check_js) = source
             .login_check_js
             .as_deref()
@@ -391,10 +442,69 @@ impl BookService {
         source: &BookSource,
         book_url: &str,
     ) -> Result<Book, AppError> {
+        self.get_book_info_for_request(user_ns, source, book_url, None).await
+    }
+
+    pub async fn get_book_info_for_request(
+        &self, user_ns: &str, source: &BookSource, book_url: &str, request_id: Option<&str>,
+    ) -> Result<Book, AppError> {
+        let request_url = self.link_for_request(user_ns, source, LinkRole::Book, book_url, request_id).await?;
         let res = self
-            .fetch_source_url(user_ns, source, book_url, &source.book_source_url)
+            .fetch_source_url(user_ns, source, &request_url)
             .await?;
-        Ok(self.parser.book_info(source, &res.body, &res.url, book_url))
+        let mut book =
+            self.parser.book_info(source, &res.body, &res.url, &request_url);
+        strip_render_options(&mut book.book_url);
+        book.book_request_id = request_id.map(str::to_owned);
+        if book.book_request_id.is_none() {
+            if let Some(webview) = &self.remote_webview {
+                book.book_request_id = webview.remember_request(user_ns, &source.book_source_url, LinkRole::Book, &request_url).await?;
+            }
+        }
+        if let Some(toc_url) = &mut book.toc_url {
+            if let Some(webview) = &self.remote_webview {
+                book.toc_request_id = webview
+                    .remember_request(user_ns, &source.book_source_url, LinkRole::Catalog, toc_url)
+                    .await?;
+            }
+            strip_render_options(toc_url);
+        }
+        if let (Some(webview), Some(book_id), Some(toc_url)) =
+            (&self.remote_webview, book.book_request_id.as_deref(), book.toc_url.as_deref())
+        {
+            webview.remember_book_catalog(
+                user_ns, &source.book_source_url, &book.book_url, book_id,
+                toc_url, book.toc_request_id.as_deref(),
+            ).await?;
+        }
+        Ok(book)
+    }
+
+    pub async fn chapter_request_for_book(
+        &self, user_ns: &str, source: &BookSource, book_url: &str, book_id: &str, chapter_url: &str,
+    ) -> Result<Option<String>, AppError> {
+        let remembered = match &self.remote_webview {
+            Some(webview) => webview.book_catalog(user_ns, &source.book_source_url, book_url, book_id).await?,
+            None => None,
+        };
+        let (toc_url, toc_id) = match remembered {
+            Some(address) => address,
+            None => self.resolve_toc_url(user_ns, source, book_url, Some(book_id)).await?,
+        };
+        let chapters = self.get_chapter_list_for_request(user_ns, source, Some(book_url), &toc_url, toc_id.as_deref(), false).await?;
+        Ok(chapters.into_iter()
+            .find(|chapter| repair_encoded_url(&chapter.url) == chapter_url)
+            .ok_or_else(|| AppError::BadRequest("章节不在所选目录中，请刷新目录".to_owned()))?
+            .chapter_request_id)
+    }
+
+    async fn link_for_request(
+        &self, user_ns: &str, source: &BookSource, role: LinkRole, url: &str, request_id: Option<&str>,
+    ) -> Result<String, AppError> {
+        if let (Some(webview), Some(id)) = (&self.remote_webview, request_id.filter(|id| *id != "http")) {
+            return webview.request_by_id(user_ns, &source.book_source_url, role, url, id).await;
+        }
+        Ok(url.to_owned())
     }
 
     pub async fn resolve_toc_url(
@@ -402,22 +512,25 @@ impl BookService {
         user_ns: &str,
         source: &BookSource,
         book_url: &str,
-    ) -> Result<String, AppError> {
+        request_id: Option<&str>,
+    ) -> Result<(String, Option<String>), AppError> {
         // A transient detail-page failure must not block a known catalog or its cache.
         if let Some(book) = self.get_shelf_book(user_ns, book_url).await? {
-            if normalize_source_url(&book.origin) == normalize_source_url(&source.book_source_url) {
+            if normalize_source_url(&book.origin) == normalize_source_url(&source.book_source_url)
+                && request_id.is_none_or(|id| book.book_request_id.as_deref() == Some(id))
+            {
                 if let Some(toc_url) = book.toc_url.filter(|url| !url.trim().is_empty()) {
-                    return Ok(repair_encoded_url(&toc_url));
+                    return Ok((repair_encoded_url(&toc_url), book.toc_request_id));
                 }
             }
         }
-        let book = self.get_book_info(user_ns, source, book_url).await?;
-        Ok(repair_encoded_url(
+        let book = self.get_book_info_for_request(user_ns, source, book_url, request_id).await?;
+        Ok((repair_encoded_url(
             book.toc_url
                 .as_deref()
                 .filter(|url| !url.trim().is_empty())
                 .unwrap_or(book_url),
-        ))
+        ), book.toc_request_id))
     }
 
     pub async fn get_chapter_list(
@@ -426,8 +539,7 @@ impl BookService {
         source: &BookSource,
         toc_url: &str,
     ) -> Result<Vec<BookChapter>, AppError> {
-        self.get_chapter_list_with_cache(user_ns, source, toc_url, false)
-            .await
+        self.get_chapter_list_with_cache(user_ns, source, toc_url, false).await
     }
 
     pub async fn get_chapter_list_with_cache(
@@ -437,16 +549,56 @@ impl BookService {
         toc_url: &str,
         force_refresh: bool,
     ) -> Result<Vec<BookChapter>, AppError> {
-        // Check cache first (unless force refresh)
-        if !force_refresh {
-            if let Ok(Some(cached)) = self.load_chapter_list_cache(user_ns, toc_url).await {
-                if !cached.is_empty() {
-                    return Ok(cached);
+        self.get_chapter_list_for_request(user_ns, source, None, toc_url, None, force_refresh)
+            .await
+    }
+
+    pub async fn get_chapter_list_for_request(
+        &self, user_ns: &str, source: &BookSource, book_url: Option<&str>, toc_url: &str, request_id: Option<&str>, force_refresh: bool,
+    ) -> Result<Vec<BookChapter>, AppError> {
+        let request_url = self.link_for_request(user_ns, source, LinkRole::Catalog, toc_url, request_id).await?;
+        let inline_id = webview_link(&request_url).map(|(_, options)| md5_hex(options));
+        let effective_id = if self.remote_webview.is_some() {
+            request_id.or(inline_id.as_deref())
+        } else {
+            None
+        };
+        let cache_key = request_cache_key(toc_url, effective_id);
+        let (owner, epoch) = {
+            let _guard = self.cache_lock.lock().await;
+            let owner = match book_url.filter(|url| !url.trim().is_empty()) {
+                Some(url) => Some(repair_encoded_url(url)),
+                None => self.catalog_owner(user_ns, &cache_key).await?,
+            };
+            if let Some(url) = owner.as_deref() {
+                let _ = self.record_catalog_owner(user_ns, &cache_key, url).await;
+            }
+            let epoch = if let Some(url) = &owner {
+                self.catalog_epoch(user_ns, url).await?
+            } else {
+                None
+            };
+            if !force_refresh {
+                let cached = match &owner {
+                    Some(url) => self.read_book_catalog(user_ns, url, &cache_key).await,
+                    None => self.read_catalog(&self.chapter_list_cache_path(user_ns, &cache_key)).await,
+                };
+                if let Ok(Some(cached)) = cached {
+                    if !cached.is_empty() {
+                        if let Some(url) = &owner {
+                            let path = self.book_catalog_path(user_ns, url, &cache_key);
+                            if !path.exists() {
+                                let _ = self.write_catalog(&path, &cached).await;
+                            }
+                        }
+                        return Ok(cached);
+                    }
                 }
             }
-        }
+            (owner, epoch)
+        };
         let (chapters, _) = self
-            .get_chapter_list_with_pagination(user_ns, source, toc_url)
+            .get_chapter_list_with_pagination(user_ns, source, &request_url)
             .await?;
         if chapters.is_empty() {
             return Err(AppError::BadRequest(
@@ -454,9 +606,14 @@ impl BookService {
             ));
         }
         // Replace the previous catalog only after a successful, nonempty response.
-        let _ = self
-            .save_chapter_list_cache(user_ns, toc_url, &chapters)
-            .await;
+        let _guard = self.cache_lock.lock().await;
+        if let Some(url) = &owner {
+            if self.catalog_epoch(user_ns, url).await? == epoch {
+                let _ = self.write_catalog(&self.book_catalog_path(user_ns, url, &cache_key), &chapters).await;
+            }
+        } else if self.catalog_owner(user_ns, &cache_key).await?.is_none() {
+            let _ = self.write_catalog(&self.chapter_list_cache_path(user_ns, &cache_key), &chapters).await;
+        }
         Ok(chapters)
     }
 
@@ -473,18 +630,18 @@ impl BookService {
 
         // Fetch first page
         let res = self
-            .fetch_source_url(user_ns, source, toc_url, &source.book_source_url)
+            .fetch_source_url(user_ns, source, toc_url)
             .await?;
         let (chapters, next_urls) = self.parser.chapter_list(source, &res.body, &res.url);
 
-        visited_page_urls.insert(toc_url.to_string());
+        visited_page_urls.insert(webview_link_identity(toc_url).to_string());
 
         // Add first page chapters with deduplication
         for ch in chapters {
-            if seen_chapter_urls.contains(&ch.url) {
+            if seen_chapter_urls.contains(webview_link_identity(&ch.url)) {
                 continue;
             }
-            seen_chapter_urls.insert(ch.url.clone());
+            seen_chapter_urls.insert(webview_link_identity(&ch.url).to_owned());
             all_chapters.push(BookChapter {
                 title: ch.title,
                 url: ch.url,
@@ -498,27 +655,27 @@ impl BookService {
         // Filter out already visited URLs
         let pending_urls: Vec<String> = next_urls
             .into_iter()
-            .filter(|u| !visited_page_urls.contains(u))
+            .filter(|u| !visited_page_urls.contains(webview_link_identity(u)))
             .collect();
 
         if pending_urls.len() > 1 {
             // Multiple URLs from option dropdown - fetch all pages
             for url in pending_urls {
-                if visited_page_urls.contains(&url) {
+                if visited_page_urls.contains(webview_link_identity(&url)) {
                     continue;
                 }
-                visited_page_urls.insert(url.clone());
+                visited_page_urls.insert(webview_link_identity(&url).to_owned());
 
                 let res = self
-                    .fetch_source_url(user_ns, source, &url, &source.book_source_url)
+                    .fetch_source_url(user_ns, source, &url)
                     .await?;
                 let (chapters, _) = self.parser.chapter_list(source, &res.body, &res.url);
 
                 for ch in chapters {
-                    if seen_chapter_urls.contains(&ch.url) {
+                    if seen_chapter_urls.contains(webview_link_identity(&ch.url)) {
                         continue;
                     }
-                    seen_chapter_urls.insert(ch.url.clone());
+                    seen_chapter_urls.insert(webview_link_identity(&ch.url).to_owned());
                     all_chapters.push(BookChapter {
                         title: ch.title,
                         url: ch.url,
@@ -532,21 +689,21 @@ impl BookService {
             // Single next page link - follow sequentially
             let mut current_url = pending_urls[0].clone();
             loop {
-                if visited_page_urls.contains(&current_url) {
+                if visited_page_urls.contains(webview_link_identity(&current_url)) {
                     break;
                 }
-                visited_page_urls.insert(current_url.clone());
+                visited_page_urls.insert(webview_link_identity(&current_url).to_owned());
 
                 let res = self
-                    .fetch_source_url(user_ns, source, &current_url, &source.book_source_url)
+                    .fetch_source_url(user_ns, source, &current_url)
                     .await?;
                 let (chapters, next_urls) = self.parser.chapter_list(source, &res.body, &res.url);
 
                 for ch in chapters {
-                    if seen_chapter_urls.contains(&ch.url) {
+                    if seen_chapter_urls.contains(webview_link_identity(&ch.url)) {
                         continue;
                     }
-                    seen_chapter_urls.insert(ch.url.clone());
+                    seen_chapter_urls.insert(webview_link_identity(&ch.url).to_owned());
                     all_chapters.push(BookChapter {
                         title: ch.title,
                         url: ch.url,
@@ -559,7 +716,7 @@ impl BookService {
                 // Get next page
                 let next = next_urls
                     .into_iter()
-                    .find(|u| !visited_page_urls.contains(u));
+                    .find(|u| !visited_page_urls.contains(webview_link_identity(u)));
                 match next {
                     Some(url) if !url.is_empty() => current_url = url,
                     _ => break,
@@ -567,6 +724,18 @@ impl BookService {
             }
         }
 
+        if let Some(webview) = &self.remote_webview {
+            let links: Vec<_> = all_chapters.iter().map(|chapter| chapter.url.as_str()).collect();
+            let ids = webview.remember_requests(
+                user_ns, &source.book_source_url, LinkRole::Chapter, &links,
+            ).await?;
+            for (chapter, id) in all_chapters.iter_mut().zip(ids) {
+                chapter.chapter_request_id = Some(id.unwrap_or_else(|| "http".to_owned()));
+            }
+        }
+        for chapter in &mut all_chapters {
+            strip_render_options(&mut chapter.url);
+        }
         Ok((all_chapters, visited_page_urls.into_iter().collect()))
     }
 
@@ -577,39 +746,77 @@ impl BookService {
         source: &BookSource,
         chapter_url: &str,
     ) -> Result<String, AppError> {
+        self.get_content_for_request(user_ns, book_url, source, chapter_url, None, false).await
+    }
+
+    pub async fn get_content_for_request(
+        &self,
+        user_ns: &str,
+        book_url: &str,
+        source: &BookSource,
+        chapter_rule: &str,
+        request_id: Option<&str>,
+        refresh: bool,
+    ) -> Result<String, AppError> {
+        let chapter_url = webview_link_identity(chapter_rule);
+        let mut current_url = self.link_for_request(
+            user_ns, source, LinkRole::Chapter, chapter_rule, request_id,
+        ).await?;
+        let inline_request = webview_link(&current_url).map(|(_, options)| md5_hex(options));
+        let effective_id = if self.remote_webview.is_some() {
+            request_id.filter(|id| *id != "http").or(inline_request.as_deref())
+        } else { None };
+        let cache_key = request_cache_key(chapter_url, effective_id);
         let book_key = md5_hex(book_url);
         tracing::debug!(
             "get_content called, chapter_url={}, book_key={}",
             chapter_url,
             book_key
         );
-        self.restore_legacy_chapter_cache(user_ns, book_url, chapter_url)
-            .await;
-        if let Ok(Some(cached)) = self.cache.get(user_ns, &book_key, chapter_url).await {
-            if !cached.trim().is_empty() {
-                tracing::debug!("get_content returning cached content, len={}", cached.len());
-                return Ok(cached);
+        let owner = repair_encoded_url(book_url);
+        let epoch = {
+            let _guard = self.cache_lock.lock().await;
+            let epoch = self.catalog_epoch(user_ns, &owner).await?;
+            if !refresh {
+                if effective_id.is_none() && epoch.is_none() {
+                    self.restore_legacy_chapter_cache(user_ns, book_url, chapter_url).await;
+                }
+                if let Ok(Some(cached)) = self.cache.get(user_ns, &book_key, &cache_key).await {
+                    if !cached.trim().is_empty() {
+                        return Ok(cached);
+                    }
+                }
             }
-            let _ = self.cache.remove(user_ns, &book_key, chapter_url).await;
-        }
+            epoch
+        };
         tracing::debug!("get_content cache miss, fetching from network");
 
         let mut all_content = String::new();
         let mut visited_urls = std::collections::HashSet::new();
-        let mut current_url = chapter_url.to_string();
+
+        let mut chapter_site_url = webview_link_identity(chapter_url).to_string();
 
         // Follow pagination to get all content pages
         loop {
-            if visited_urls.contains(&current_url) {
+            if visited_urls.contains(webview_link_identity(&current_url)) {
                 tracing::debug!("get_content detected loop, breaking");
                 break;
             }
-            visited_urls.insert(current_url.clone());
+            visited_urls.insert(webview_link_identity(&current_url).to_owned());
 
-            tracing::debug!("get_content fetching: {}", current_url);
+            tracing::debug!("get_content fetching page");
             let res = self
-                .fetch_source_url(user_ns, source, &current_url, &source.book_source_url)
+                .fetch_source_url(user_ns, source, &current_url)
                 .await?;
+            let rendered = self.remote_webview.is_some() && webview_link(&current_url).is_some();
+            let page_url = if rendered {
+                res.url.as_str()
+            } else {
+                webview_link_identity(&current_url)
+            };
+            if visited_urls.len() == 1 && rendered {
+                chapter_site_url.clone_from(&res.url);
+            }
             tracing::debug!("get_content fetch done, body len={}", res.body.len());
             let content = self.parser.content(source, &res.body, &res.url);
             tracing::debug!("get_content parsed content len={}", content.len());
@@ -623,8 +830,7 @@ impl BookService {
 
             // Check for next page
             if let Some(next_url) = self.parser.next_content_url(source, &res.body, &res.url) {
-                tracing::debug!("get_content found next_url: {}", next_url);
-                if should_follow_content_page(chapter_url, &current_url, &next_url) {
+                if should_follow_content_page(&chapter_site_url, page_url, webview_link_identity(&next_url)) {
                     current_url = next_url;
                 } else {
                     tracing::debug!("get_content next_url appears to be next chapter, stopping");
@@ -642,10 +848,10 @@ impl BookService {
                 "书源未返回正文，请重试或更换书源".to_string(),
             ));
         }
-        let _ = self
-            .cache
-            .put(user_ns, &book_key, chapter_url, &all_content)
-            .await;
+        let _guard = self.cache_lock.lock().await;
+        if self.catalog_epoch(user_ns, &owner).await? == epoch {
+            let _ = self.cache.put(user_ns, &book_key, &cache_key, &all_content).await;
+        }
         Ok(all_content)
     }
 
@@ -684,34 +890,75 @@ impl BookService {
         Ok(())
     }
 
-    /// Delete all chapter content cache for a book
     pub async fn delete_book_cache(&self, user_ns: &str, book_url: &str) -> Result<bool, AppError> {
-        // Remove old chapter-keyed files too, so they cannot reappear after a clear.
-        let mut deleted_legacy = false;
-        let mut toc_urls = vec![book_url.to_string()];
-        if let Some(book) = self.get_shelf_book(user_ns, book_url).await? {
-            if let Some(toc_url) = book.toc_url {
-                toc_urls.push(toc_url);
+        let (content, _) = self.clear_book_cache(user_ns, book_url, None).await?;
+        Ok(content)
+    }
+
+    pub async fn clear_book_cache(
+        &self, user_ns: &str, book_url: &str, removed: Option<&Book>,
+    ) -> Result<(bool, bool), AppError> {
+        let supplied_url = book_url;
+        let book_url = repair_encoded_url(supplied_url);
+        let shelf = self.read_bookshelf(user_ns).await?;
+        let book = removed.or_else(|| shelf.iter().find(|book| book.book_url == book_url));
+        let _guard = self.cache_lock.lock().await;
+        let mut legacy_keys = HashSet::from([book_url.clone(), supplied_url.to_owned()]);
+        if let Some(book) = book {
+            if let Some(toc) = &book.toc_url {
+                legacy_keys.insert(toc.clone());
+                legacy_keys.insert(request_cache_key(toc, book.toc_request_id.as_deref()));
             }
         }
-        for toc_url in toc_urls {
-            if let Some(chapters) = self.load_chapter_list_cache(user_ns, &toc_url).await? {
+        let mut deleted_catalog = false;
+        let mut deleted_legacy_content = false;
+        let directory = self.book_catalog_dir(user_ns, &book_url);
+        fs::create_dir_all(&directory).await.map_err(anyhow::Error::from)?;
+        // Advance before removing files. A request that began before this clear
+        // cannot repopulate the directory when its network response arrives.
+        fs::write(directory.join(".epoch"), uuid::Uuid::new_v4().to_string()).await.map_err(anyhow::Error::from)?;
+        let mut entries = fs::read_dir(&directory).await.map_err(anyhow::Error::from)?;
+        while let Some(entry) = entries.next_entry().await.map_err(anyhow::Error::from)? {
+            if entry.path().extension().is_some_and(|ext| ext == "json") {
+                fs::remove_file(entry.path()).await.map_err(anyhow::Error::from)?;
+                deleted_catalog = true;
+            }
+        }
+        for key in legacy_keys {
+            let shared = shelf.iter().filter(|other| other.book_url != book_url).any(|other| {
+                other.book_url == key || other.toc_url.as_deref().is_some_and(|toc| {
+                    toc == key || request_cache_key(toc, other.toc_request_id.as_deref()) == key
+                })
+            }) || self.catalog_owners(user_ns, &key).await?.iter().any(|owner| owner != &book_url);
+            if shared {
+                continue;
+            }
+            let path = self.chapter_list_cache_path(user_ns, &key);
+            if let Ok(Some(chapters)) = self.read_catalog(&path).await {
                 for chapter in chapters {
-                    deleted_legacy |= self
-                        .cache
-                        .exists(user_ns, &md5_hex(&chapter.url), &chapter.url)
-                        .await;
-                    self.delete_chapter_content_cache(user_ns, book_url, &chapter.url)
-                        .await?;
+                    let legacy_book_key = md5_hex(&chapter.url);
+                    if !shelf.iter().any(|other| other.book_url != book_url && other.book_url == chapter.url)
+                        && self.cache.exists(user_ns, &legacy_book_key, &chapter.url).await
+                    {
+                        self.cache.remove(user_ns, &legacy_book_key, &chapter.url).await?;
+                        deleted_legacy_content = true;
+                    }
                 }
             }
+            match fs::remove_file(path).await {
+                Ok(()) => deleted_catalog = true,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => return Err(AppError::Internal(err.into())),
+            }
         }
-        let book_key = md5_hex(book_url);
-        self.cache
-            .remove_book(user_ns, &book_key)
-            .await
-            .map(|deleted| deleted || deleted_legacy)
-            .map_err(|e| AppError::Internal(e.into()))
+
+        let mut deleted_content = self.cache.remove_book(user_ns, &md5_hex(&book_url)).await?;
+        if supplied_url != book_url {
+            deleted_content |= self.cache.remove_book(user_ns, &md5_hex(supplied_url)).await?;
+            self.delete_book_sources_cache(user_ns, supplied_url).await?;
+        }
+        self.delete_book_sources_cache(user_ns, &book_url).await?;
+        Ok((deleted_content || deleted_legacy_content, deleted_catalog))
     }
 
     /// Check if a specific chapter is cached
@@ -721,15 +968,19 @@ impl BookService {
         book_url: &str,
         chapter_url: &str,
     ) -> bool {
-        self.restore_legacy_chapter_cache(user_ns, book_url, chapter_url)
-            .await;
-        let book_key = md5_hex(book_url);
-        self.cache.exists(user_ns, &book_key, chapter_url).await
+        self.is_chapter_cached_for_request(user_ns, book_url, chapter_url, None).await
     }
 
-    pub async fn chapter_list_cache_exists(&self, user_ns: &str, toc_url: &str) -> bool {
-        let path = self.chapter_list_cache_path(user_ns, toc_url);
-        path.exists()
+    pub async fn is_chapter_cached_for_request(
+        &self, user_ns: &str, book_url: &str, chapter_url: &str, request_id: Option<&str>,
+    ) -> bool {
+        let request_id = request_id.filter(|id| self.remote_webview.is_some() && *id != "http");
+        let _guard = self.cache_lock.lock().await;
+        if request_id.is_none() && matches!(self.catalog_epoch(user_ns, &repair_encoded_url(book_url)).await, Ok(None)) {
+            self.restore_legacy_chapter_cache(user_ns, book_url, chapter_url).await;
+        }
+        let key = request_cache_key(chapter_url, request_id);
+        self.cache.exists(user_ns, &md5_hex(book_url), &key).await
     }
 
     pub async fn get_bookshelf(&self, user_ns: &str) -> Result<Vec<Book>, AppError> {
@@ -979,22 +1230,16 @@ impl BookService {
         Ok(count)
     }
 
-    pub async fn cache_chapter(
-        &self,
-        user_ns: &str,
-        book_url: &str,
-        source: &BookSource,
-        chapter_url: &str,
-        refresh: bool,
-    ) -> Result<(), AppError> {
-        if refresh {
-            self.delete_chapter_content_cache(user_ns, book_url, chapter_url)
-                .await?;
+    pub async fn count_cached_catalog(
+        &self, user_ns: &str, book_url: &str, chapters: &[BookChapter],
+    ) -> usize {
+        let mut count = 0;
+        for chapter in chapters {
+            if self.is_chapter_cached_for_request(user_ns, book_url, &chapter.url, chapter.chapter_request_id.as_deref()).await {
+                count += 1;
+            }
         }
-        let _ = self
-            .get_content(user_ns, book_url, source, chapter_url)
-            .await?;
-        Ok(())
+        count
     }
 
     pub async fn get_cover(&self, user_ns: &str, url: &str) -> Result<(Vec<u8>, String), AppError> {
@@ -1170,84 +1415,133 @@ impl BookService {
         Ok(())
     }
 
-    // Chapter list cache methods
-    fn chapter_list_cache_path(&self, user_ns: &str, toc_url: &str) -> PathBuf {
-        let name = md5_hex(toc_url);
-        self.storage_dir
-            .join("data")
-            .join(user_ns)
-            .join("chapters")
-            .join(format!("{}.json", name))
+    fn catalog_root(&self, user_ns: &str) -> PathBuf {
+        self.storage_dir.join("data").join(user_ns).join("chapters")
+    }
+
+    fn chapter_list_cache_path(&self, user_ns: &str, key: &str) -> PathBuf {
+        self.catalog_root(user_ns).join(format!("{}.json", md5_hex(webview_link_identity(key))))
+    }
+
+    fn book_catalog_dir(&self, user_ns: &str, book_url: &str) -> PathBuf {
+        self.catalog_root(user_ns).join("books").join(md5_hex(book_url))
+    }
+
+    fn book_catalog_path(&self, user_ns: &str, book_url: &str, key: &str) -> PathBuf {
+        self.book_catalog_dir(user_ns, book_url).join(format!("{}.json", md5_hex(webview_link_identity(key))))
+    }
+
+    fn catalog_owners_dir(&self, user_ns: &str, key: &str) -> PathBuf {
+        self.catalog_root(user_ns).join("owners").join(md5_hex(webview_link_identity(key)))
+    }
+
+    async fn catalog_owners(&self, user_ns: &str, key: &str) -> Result<Vec<String>, AppError> {
+        let mut dir = match fs::read_dir(self.catalog_owners_dir(user_ns, key)).await {
+            Ok(dir) => dir,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(err) => return Err(AppError::Internal(err.into())),
+        };
+        let mut owners = Vec::new();
+        while let Some(entry) = dir.next_entry().await.map_err(anyhow::Error::from)? {
+            owners.push(fs::read_to_string(entry.path()).await.map_err(anyhow::Error::from)?);
+        }
+        Ok(owners)
+    }
+
+    async fn catalog_owner(&self, user_ns: &str, key: &str) -> Result<Option<String>, AppError> {
+        let mut owners: HashSet<_> = self.catalog_owners(user_ns, key).await?.into_iter().collect();
+        // Old clients can omit bookUrl. Associate the request only when the
+        // directory has a single known book, including legacy shelf entries.
+        for book in self.read_bookshelf(user_ns).await? {
+            if book.book_url == key || book.toc_url.as_deref().is_some_and(|toc| {
+                toc == key || request_cache_key(toc, book.toc_request_id.as_deref()) == key
+            }) {
+                owners.insert(book.book_url);
+            }
+        }
+        Ok(if owners.len() == 1 { owners.into_iter().next() } else { None })
+    }
+
+    async fn record_catalog_owner(&self, user_ns: &str, key: &str, owner: &str) -> Result<(), AppError> {
+        let dir = self.catalog_owners_dir(user_ns, key);
+        let path = dir.join(md5_hex(owner));
+        if !path.exists() {
+            fs::create_dir_all(dir).await.map_err(anyhow::Error::from)?;
+            fs::write(path, owner).await.map_err(anyhow::Error::from)?;
+        }
+        Ok(())
+    }
+
+    async fn catalog_epoch(&self, user_ns: &str, owner: &str) -> Result<Option<String>, AppError> {
+        match fs::read_to_string(self.book_catalog_dir(user_ns, owner).join(".epoch")).await {
+            Ok(epoch) => Ok(Some(epoch)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(AppError::Internal(err.into())),
+        }
+    }
+
+    async fn read_catalog(&self, path: &std::path::Path) -> Result<Option<Vec<BookChapter>>, AppError> {
+        match fs::read_to_string(path).await {
+            Ok(data) => serde_json::from_str(&data).map(Some).map_err(|err| AppError::BadRequest(err.to_string())),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(AppError::Internal(err.into())),
+        }
+    }
+
+    async fn write_catalog(&self, path: &std::path::Path, chapters: &[BookChapter]) -> Result<(), AppError> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).await.map_err(anyhow::Error::from)?;
+        }
+        let data = serde_json::to_string(chapters).map_err(|err| AppError::BadRequest(err.to_string()))?;
+        fs::write(path, data).await.map_err(anyhow::Error::from)?;
+        Ok(())
+    }
+
+    async fn read_book_catalog(
+        &self, user_ns: &str, owner: &str, key: &str,
+    ) -> Result<Option<Vec<BookChapter>>, AppError> {
+        let cached = self.read_catalog(&self.book_catalog_path(user_ns, owner, key)).await?;
+        if cached.is_some() || self.catalog_epoch(user_ns, owner).await?.is_some() {
+            return Ok(cached);
+        }
+        self.read_catalog(&self.chapter_list_cache_path(user_ns, key)).await
+    }
+
+    pub async fn load_book_chapter_list_cache(
+        &self, user_ns: &str, book_url: &str, key: &str,
+    ) -> Result<Option<Vec<BookChapter>>, AppError> {
+        let _guard = self.cache_lock.lock().await;
+        self.read_book_catalog(user_ns, &repair_encoded_url(book_url), key).await
     }
 
     pub async fn load_chapter_list_cache(
-        &self,
-        user_ns: &str,
-        toc_url: &str,
+        &self, user_ns: &str, key: &str,
     ) -> Result<Option<Vec<BookChapter>>, AppError> {
-        let path = self.chapter_list_cache_path(user_ns, toc_url);
-        if !path.exists() {
-            return Ok(None);
-        }
-        let data = fs::read_to_string(&path)
-            .await
-            .map_err(|e| AppError::Internal(e.into()))?;
-        let list: Vec<BookChapter> =
-            serde_json::from_str(&data).map_err(|e| AppError::BadRequest(e.to_string()))?;
-        Ok(Some(list))
+        let _guard = self.cache_lock.lock().await;
+        self.read_book_catalog(user_ns, &repair_encoded_url(key), key).await
     }
 
     pub async fn save_chapter_list_cache(
-        &self,
-        user_ns: &str,
-        toc_url: &str,
-        chapters: &Vec<BookChapter>,
+        &self, user_ns: &str, key: &str, chapters: &Vec<BookChapter>,
     ) -> Result<(), AppError> {
-        let path = self.chapter_list_cache_path(user_ns, toc_url);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .await
-                .map_err(|e| AppError::Internal(e.into()))?;
-        }
-        let data =
-            serde_json::to_string(chapters).map_err(|e| AppError::BadRequest(e.to_string()))?;
-        fs::write(&path, data)
-            .await
-            .map_err(|e| AppError::Internal(e.into()))?;
-        Ok(())
-    }
-
-    pub async fn delete_chapter_list_cache(
-        &self,
-        user_ns: &str,
-        toc_url: &str,
-    ) -> Result<(), AppError> {
-        let path = self.chapter_list_cache_path(user_ns, toc_url);
-        if path.exists() {
-            fs::remove_file(&path)
-                .await
-                .map_err(|e| AppError::Internal(e.into()))?;
-        }
-        Ok(())
+        let _guard = self.cache_lock.lock().await;
+        let owner = repair_encoded_url(key);
+        // An explicit write under a cleared book URL is a fresh catalog.
+        let path = if self.catalog_epoch(user_ns, &owner).await?.is_some() {
+            self.book_catalog_path(user_ns, &owner, key)
+        } else {
+            self.chapter_list_cache_path(user_ns, key)
+        };
+        self.write_catalog(&path, chapters).await
     }
 
     async fn clear_book_related_cache(&self, user_ns: &str, book: &Book) -> Result<(), AppError> {
         if !book.book_url.is_empty() {
-            let _ = self.delete_book_cache(user_ns, &book.book_url).await;
-            let _ = self
-                .delete_book_sources_cache(user_ns, &book.book_url)
-                .await;
-            let _ = self
-                .delete_chapter_list_cache(user_ns, &book.book_url)
-                .await;
-        }
-        if let Some(toc_url) = &book.toc_url {
-            if !toc_url.is_empty() {
-                let _ = self.delete_chapter_list_cache(user_ns, toc_url).await;
-            }
+            self.clear_book_cache(user_ns, &book.book_url, Some(book)).await?;
         }
         Ok(())
     }
+
 }
 
 fn apply_login_check_js(source: &BookSource, res: FetchResponse) -> FetchResponse {
@@ -1868,6 +2162,19 @@ fn books_match_for_delete(existing: &Book, target: &Book) -> bool {
         && !target.author.is_empty()
         && existing.name == target.name
         && existing.author == target.author
+}
+
+pub(crate) fn request_cache_key(url: &str, id: Option<&str>) -> String {
+    match id {
+        Some(id) => format!("{}\0{id}", webview_link_identity(url)),
+        None => url.to_owned(),
+    }
+}
+
+fn strip_render_options(url: &mut String) {
+    if let Some((identity, _)) = webview_link(url) {
+        url.truncate(identity.len());
+    }
 }
 
 fn sanitize_book_urls(book: &mut Book) {

@@ -18,6 +18,8 @@ pub enum AppError {
     Db(#[from] sqlx::Error),
     #[error("http error")]
     Http(#[from] reqwest::Error),
+    #[error("upstream error: {0}")]
+    Upstream(String),
 }
 
 #[derive(Debug, Serialize)]
@@ -57,7 +59,7 @@ impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         match &self {
             AppError::NotFound(_) | AppError::BadRequest(_) => tracing::debug!("{:?}", self),
-            AppError::Http(_) => tracing::warn!("{:?}", self),
+            AppError::Http(_) | AppError::Upstream(_) => tracing::warn!("{:?}", self),
             AppError::Db(_) | AppError::Internal(_) => tracing::error!("{:?}", self),
         }
         let (status, message) = match &self {
@@ -68,6 +70,7 @@ impl IntoResponse for AppError {
                 "database error".to_string(),
             ),
             AppError::Http(_) => (StatusCode::BAD_GATEWAY, "upstream error".to_string()),
+            AppError::Upstream(msg) => (StatusCode::BAD_GATEWAY, msg.clone()),
             AppError::Internal(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal error".to_string(),

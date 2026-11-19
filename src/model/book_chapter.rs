@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 pub struct BookChapter {
     pub title: String,
     pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chapter_request_id: Option<String>,
     pub index: i32,
     pub tag: Option<String>,
     pub is_vip: bool,

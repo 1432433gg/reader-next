@@ -232,7 +232,7 @@ async function refreshCachedChapterState() {
     cachedChapterUrls.value = new Set()
     return
   }
-  cachedChapterUrls.value = await listBrowserCachedChapterUrls(store.book.bookUrl).catch(() => new Set())
+  cachedChapterUrls.value = await listBrowserCachedChapterUrls(store.book.bookUrl, store.chapters).catch(() => new Set())
 }
 
 function isChapterCached(chapterUrl?: string) {

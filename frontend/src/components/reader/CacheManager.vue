@@ -147,7 +147,7 @@ async function refreshStats() {
   }
   const [serverList, browserCount] = await Promise.all([
     getBookshelfWithCacheInfo().catch(() => []),
-    countBrowserBookCache(store.book.bookUrl).catch(() => 0),
+    countBrowserBookCache(store.book.bookUrl, store.chapters).catch(() => 0),
   ])
   const matched = serverList.find((book) => book.bookUrl === store.book?.bookUrl)
   serverCachedCount.value = matched?.cachedChapterCount || 0
@@ -168,6 +168,8 @@ function startServerCaching(count: number) {
 
   sse = cacheBookSSE({
     bookUrl: store.book.bookUrl,
+    bookRequestId: store.book.bookRequestId,
+    bookSourceUrl: store.book.origin,
     tocUrl: store.currentChapter?.url,
     count,
     concurrentCount: 8,

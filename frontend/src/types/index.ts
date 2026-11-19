@@ -10,10 +10,12 @@ export interface Book {
   name: string
   author: string
   bookUrl: string
+  bookRequestId?: string
   origin: string
   originName?: string
   coverUrl?: string
   tocUrl?: string
+  tocRequestId?: string
   charset?: string
   customCoverUrl?: string
   canUpdate?: boolean
@@ -45,6 +47,7 @@ export interface SearchBook {
   name: string
   author: string
   bookUrl: string
+  bookRequestId?: string
   origin: string
   originName?: string
   originGroup?: string
@@ -59,6 +62,7 @@ export interface SearchBook {
 
 // ─── 章节 ───
 export interface BookChapter {
+  chapterRequestId?: string
   title: string
   url: string
   index: number

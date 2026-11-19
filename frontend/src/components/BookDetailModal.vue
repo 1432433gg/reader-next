@@ -148,6 +148,8 @@ watch(() => props.modelValue, async (visible) => {
       chapters.value = await getChapterList({
         bookUrl: b.bookUrl,
         tocUrl: b.tocUrl || undefined,
+        ...(b.bookRequestId && { bookRequestId: b.bookRequestId }),
+        ...(b.tocRequestId && { tocRequestId: b.tocRequestId }),
         bookSourceUrl: b.origin,
       })
     } catch {

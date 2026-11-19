@@ -343,7 +343,7 @@ async function selectCandidate(item: CandidateItem) {
   selectedCandidate.value = item
   candidatePreview.value = null
   try {
-    candidatePreview.value = await getBookInfo(item.book.bookUrl, item.book.origin)
+    candidatePreview.value = await getBookInfo(item.book.bookUrl, item.book.origin, item.book.bookRequestId)
   } catch {
     candidatePreview.value = null
   }
@@ -360,7 +360,7 @@ function loadMoreSources() {
 async function handleSwitch(res: SearchBook) {
   if (store.loading) return
   try {
-    const nextBook = await store.switchSource(res.bookUrl, res.origin)
+    const nextBook = await store.switchSource(res.bookUrl, res.origin, res.bookRequestId)
     store.closePanel()
     appStore.showToast(`已切换到 ${nextBook?.originName || nextBook?.origin || res.origin}`, 'success')
   } catch (e: any) {

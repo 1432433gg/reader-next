@@ -413,6 +413,20 @@ fn split_url_options(rule: &str) -> (&str, Option<&str>) {
     (rule, None)
 }
 
+/// Split an explicitly marked render link without consuming its request options.
+pub(crate) fn webview_link(rule: &str) -> Option<(&str, &str)> {
+    let (url, options) = split_url_options(rule);
+    let options = options?;
+    parse_url_options(options)
+        .ok()?
+        .get("webView")
+        .is_some_and(is_truthy_webview)
+        .then_some((url, options))
+}
+
+pub(crate) fn webview_link_identity(rule: &str) -> &str {
+    webview_link(rule).map_or(rule, |(url, _)| url)
+}
 fn strip_url_options(rule: &str) -> &str {
     split_url_options(rule).0
 }

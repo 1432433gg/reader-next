@@ -429,6 +429,9 @@ export const useReaderStore = defineStore('reader', () => {
     if (shelfBook) {
       Object.assign(shelfBook, latest)
     }
+    if (localBook.bookRequestId && localBook.bookRequestId !== latest.bookRequestId) {
+      return { ...latest, ...localBook, tocUrl: localBook.tocUrl, tocRequestId: localBook.tocRequestId }
+    }
     return latest
   }
 
@@ -487,6 +490,8 @@ export const useReaderStore = defineStore('reader', () => {
       restoredChapters = await getChapterList({
         bookUrl: latestBook.bookUrl,
         tocUrl: latestBook.tocUrl || undefined,
+        ...(latestBook.bookRequestId && { bookRequestId: latestBook.bookRequestId }),
+        ...(latestBook.tocRequestId && { tocRequestId: latestBook.tocRequestId }),
         bookSourceUrl: latestBook.origin,
       }).catch(() => session.chapters)
       if (sessionId !== bookSessionId.value) return false
@@ -966,6 +971,8 @@ export const useReaderStore = defineStore('reader', () => {
       const nextChapters = await getChapterList({
         bookUrl: latestBook.bookUrl,
         tocUrl: latestBook.tocUrl || undefined,
+        ...(latestBook.bookRequestId && { bookRequestId: latestBook.bookRequestId }),
+        ...(latestBook.tocRequestId && { tocRequestId: latestBook.tocRequestId }),
         bookSourceUrl: latestBook.origin,
       })
       if (sessionId !== bookSessionId.value) return false
@@ -1066,8 +1073,10 @@ export const useReaderStore = defineStore('reader', () => {
 
     const isLocalTxt = isLocalTxtBook(currentBook)
     const useBrowserCache = !isLocalTxt
+    const cacheAddress: [string, string, string?] = [currentBook.bookUrl, chapter.url]
+    if (chapter.chapterRequestId) cacheAddress.push(chapter.chapterRequestId)
     const browserCached = useBrowserCache
-      ? await getBrowserCachedChapter(currentBook.bookUrl, chapter.url).catch(() => null)
+      ? await getBrowserCachedChapter(...cacheAddress).catch(() => null)
       : null
     if (!isCurrent()) return null
 
@@ -1087,7 +1096,9 @@ export const useReaderStore = defineStore('reader', () => {
       chapterContent = await getBookContent({
         bookUrl: currentBook.bookUrl,
         chapterUrl: chapter.url,
+        ...(chapter.chapterRequestId && { chapterRequestId: chapter.chapterRequestId }),
         bookSourceUrl: currentBook.origin,
+        ...(currentBook.bookRequestId && { bookRequestId: currentBook.bookRequestId }),
         refresh: forceRefresh ? 1 : 0,
       })
     } catch (error) {
@@ -1106,6 +1117,7 @@ export const useReaderStore = defineStore('reader', () => {
       await setBrowserCachedChapter({
         bookUrl: currentBook.bookUrl,
         chapterUrl: chapter.url,
+        ...(chapter.chapterRequestId && { chapterRequestId: chapter.chapterRequestId }),
         chapterTitle: chapter.title,
         content: chapterContent,
       }).catch(() => undefined)
@@ -1225,7 +1237,7 @@ export const useReaderStore = defineStore('reader', () => {
   }
 
   /* ─── Switch Source ─── */
-  async function switchSource(newUrl: string, sourceUrl: string) {
+  async function switchSource(newUrl: string, sourceUrl: string, bookRequestId?: string) {
     if (!book.value) return
     let sessionId = bookSessionId.value
     const previousChapterTitle = currentChapter.value?.title || book.value.durChapterTitle
@@ -1237,6 +1249,7 @@ export const useReaderStore = defineStore('reader', () => {
         bookUrl: book.value.bookUrl,
         newUrl,
         bookSourceUrl: sourceUrl,
+        ...(bookRequestId && { bookRequestId }),
       })
       if (sessionId !== bookSessionId.value || !updatedBook) return null
 
@@ -1289,6 +1302,8 @@ export const useReaderStore = defineStore('reader', () => {
       const nextChapters = await getChapterList({
         bookUrl: book.value.bookUrl,
         bookSourceUrl: book.value.origin,
+        ...(book.value.bookRequestId && { bookRequestId: book.value.bookRequestId }),
+        ...(book.value.tocRequestId && { tocUrl: book.value.tocUrl, tocRequestId: book.value.tocRequestId }),
         refresh: 1,
       })
       if (sessionId !== bookSessionId.value) return

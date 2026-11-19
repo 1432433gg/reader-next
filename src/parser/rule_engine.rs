@@ -1,3 +1,4 @@
+use crate::crawler::url_analyzer::webview_link;
 use crate::model::rule::{BookInfoRule, SearchRule, TocRule};
 use crate::model::{
     book::Book, book_chapter::BookChapter, book_source::BookSource, search::SearchBook,
@@ -383,7 +384,7 @@ impl RuleEngine {
         }
 
         let next_url = next_url?;
-        Some(resolve_url(base_url, &next_url))
+        Some(resolve_fetch_url(base_url, &next_url))
     }
 
     fn search_detail_fallback(
@@ -472,7 +473,7 @@ impl RuleEngine {
             out.push(SearchBook {
                 name,
                 author,
-                book_url: resolve_url(base_url, &book_url),
+                book_url: resolve_fetch_url(base_url, &book_url),
                 origin: source.book_source_url.clone(),
                 cover_url,
                 intro,
@@ -481,6 +482,7 @@ impl RuleEngine {
                 update_time,
                 word_count,
                 book_source_urls: None,
+                book_request_id: None,
             });
         }
         out
@@ -522,7 +524,7 @@ impl RuleEngine {
             out.push(SearchBook {
                 name,
                 author,
-                book_url: resolve_url(base_url, &book_url),
+                book_url: resolve_fetch_url(base_url, &book_url),
                 origin: source.book_source_url.clone(),
                 cover_url,
                 intro,
@@ -531,6 +533,7 @@ impl RuleEngine {
                 update_time,
                 word_count,
                 book_source_urls: None,
+                book_request_id: None,
             });
         }
         out
@@ -734,7 +737,7 @@ impl RuleEngine {
                 .word_count
                 .as_ref()
                 .and_then(|r| eval_field_html(r, &el, base_url));
-            let book_url_abs = resolve_url(base_url, &book_url);
+            let book_url_abs = resolve_fetch_url(base_url, &book_url);
             let cover_url_abs = cover_url.map(|u| resolve_url(base_url, &u));
             out.push(SearchBook {
                 name,
@@ -748,6 +751,7 @@ impl RuleEngine {
                 update_time,
                 word_count,
                 book_source_urls: None,
+                book_request_id: None,
             });
         }
         out
@@ -789,7 +793,7 @@ impl RuleEngine {
             out.push(SearchBook {
                 name: name.unwrap_or_default(),
                 author: author.unwrap_or_default(),
-                book_url: resolve_url(base_url, &book_url.unwrap_or_default()),
+                book_url: resolve_fetch_url(base_url, &book_url.unwrap_or_default()),
                 origin: source.book_source_url.clone(),
                 cover_url: cover_url.map(|u| resolve_url(base_url, &u)),
                 intro,
@@ -798,6 +802,7 @@ impl RuleEngine {
                 update_time,
                 word_count,
                 book_source_urls: None,
+                book_request_id: None,
             });
         }
 
@@ -832,7 +837,7 @@ impl RuleEngine {
                 eval_field_json(rule.update_time.as_deref().unwrap_or(""), &item, base_url);
             let word_count =
                 eval_field_json(rule.word_count.as_deref().unwrap_or(""), &item, base_url);
-            let book_url = book_url.map(|u| resolve_url(base_url, &u));
+            let book_url = book_url.map(|u| resolve_fetch_url(base_url, &u));
             let cover_url = cover_url.map(|u| resolve_url(base_url, &u));
             out.push(SearchBook {
                 name: name.unwrap_or_default(),
@@ -846,6 +851,7 @@ impl RuleEngine {
                 update_time,
                 word_count,
                 book_source_urls: None,
+                book_request_id: None,
             });
         }
         out
@@ -923,7 +929,7 @@ fn parse_book_info_html(
         .toc_url
         .as_ref()
         .and_then(|r| eval_field_html_doc_with_ctx(r, &doc, base_url, ctx))
-        .map(|u| resolve_url(base_url, &u));
+        .map(|u| resolve_fetch_url(base_url, &u));
     let can_re_name = rule
         .can_re_name
         .as_ref()
@@ -1009,7 +1015,7 @@ fn parse_book_info_xpath(
     );
     let toc_url =
         eval_field_xpath_with_ctx(rule.toc_url.as_deref().unwrap_or(""), scope, base_url, ctx)
-            .map(|u| resolve_url(base_url, &u));
+            .map(|u| resolve_fetch_url(base_url, &u));
     let can_re_name = eval_field_xpath_with_ctx(
         rule.can_re_name.as_deref().unwrap_or(""),
         scope,
@@ -1088,7 +1094,7 @@ fn parse_book_info_json(
     );
     let toc_url =
         eval_field_json_with_ctx(rule.toc_url.as_deref().unwrap_or(""), &scope, base_url, ctx)
-            .map(|u| resolve_url(base_url, &u));
+            .map(|u| resolve_fetch_url(base_url, &u));
     let can_re_name = eval_field_json_with_ctx(
         rule.can_re_name.as_deref().unwrap_or(""),
         &scope,
@@ -1204,7 +1210,7 @@ fn parse_chapter_list_html(
     let next_urls: Vec<String> = raw_urls
         .into_iter()
         .filter(|u| !u.is_empty())
-        .map(|u| resolve_url(base_url, &u))
+        .map(|u| resolve_fetch_url(base_url, &u))
         .collect();
 
     (out, next_urls)
@@ -1288,7 +1294,7 @@ fn parse_chapter_list_xpath(
         .unwrap_or_default()
         .into_iter()
         .filter(|u| !u.is_empty())
-        .map(|u| resolve_url(base_url, &u))
+        .map(|u| resolve_fetch_url(base_url, &u))
         .collect();
 
     (out, next_urls)
@@ -1374,7 +1380,7 @@ fn parse_chapter_list_json(
         .into_iter()
         .filter_map(|v| v.as_str().map(|s| s.to_string()))
         .filter(|u| !u.is_empty())
-        .map(|u| resolve_url(base_url, &u))
+        .map(|u| resolve_fetch_url(base_url, &u))
         .collect();
 
     (out, next_urls)
@@ -1421,6 +1427,12 @@ fn pick_json_field(v: &Value, rule: Option<&str>) -> Option<String> {
     None
 }
 
+fn resolve_fetch_url(base: &str, url: &str) -> String {
+    match webview_link(url) {
+        Some((identity, options)) => format!("{},{}", resolve_url(base, identity), options),
+        None => resolve_url(base, url),
+    }
+}
 fn resolve_url(base: &str, url: &str) -> String {
     let base = normalize_source_url(base);
     let url = normalize_source_url(strip_url_config(url));
@@ -2106,6 +2118,7 @@ fn search_book_from_book(book: Book) -> Option<SearchBook> {
         update_time: book.update_time,
         word_count: book.word_count,
         book_source_urls: None,
+        book_request_id: None,
     })
 }
 
@@ -2172,7 +2185,7 @@ fn build_search_book_from_json(
     Some(SearchBook {
         name,
         author,
-        book_url: resolve_url(base_url, &book_url),
+        book_url: resolve_fetch_url(base_url, &book_url),
         origin: source.book_source_url.clone(),
         cover_url,
         intro,
@@ -2181,6 +2194,7 @@ fn build_search_book_from_json(
         update_time,
         word_count,
         book_source_urls: None,
+        book_request_id: None,
     })
 }
 
@@ -2229,6 +2243,7 @@ fn build_chapter_from_json(
     Some(BookChapter {
         title: title.clone(),
         url: finalize_chapter_url(base_url, &raw_url, &title, is_volume, index),
+        chapter_request_id: None,
         index: index as i32,
         tag,
         is_vip,
@@ -2285,7 +2300,7 @@ fn finalize_chapter_url(
     index: usize,
 ) -> String {
     if !raw_url.trim().is_empty() {
-        return resolve_url(base_url, raw_url);
+        return resolve_fetch_url(base_url, raw_url);
     }
     if is_volume {
         return format!("{}{}", title, index);
