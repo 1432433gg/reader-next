@@ -16,6 +16,7 @@ Usage:
 Behavior:
   - If version is provided: release that exact version.
   - If version is omitted: auto-bump latest git tag with patch (+1).
+  - 1.2.1 must be given explicitly and version files must already match the reviewed commit.
   - Docker image is published by .github/workflows/docker-publish.yml after the tag is pushed.
   - Default Docker repo: ghcr.io/1432433gg/reader-next
 USAGE
@@ -46,6 +47,7 @@ require_cmd() {
 require_cmd git
 require_cmd cargo
 require_cmd npm
+require_cmd node
 require_cmd gh
 require_cmd awk
 
@@ -102,10 +104,31 @@ else
 fi
 
 TAG="v${SEMVER}"
+MAKE_LATEST=true
+if [[ $SEMVER == 1.2.1 ]]; then
+  if [[ -z $INPUT_VERSION ]]; then
+    echo "Specify 1.2.1 explicitly to select the numeric test release." >&2
+    exit 1
+  fi
+  MAKE_LATEST=false
+fi
+current_branch="$(git branch --show-current)"
+if [[ -z $current_branch ]]; then
+  echo "Check out the reviewed release branch first." >&2
+  exit 1
+fi
 echo "Releasing ${TAG}"
 
 if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
   echo "Tag ${TAG} already exists locally." >&2
+  exit 1
+fi
+
+if git ls-remote --exit-code origin "refs/tags/$TAG" >/dev/null; then
+  echo "Tag $TAG already exists on origin." >&2
+  exit 1
+elif [[ $? -ne 2 ]]; then
+  echo "Cannot verify remote tag $TAG." >&2
   exit 1
 fi
 
@@ -133,17 +156,26 @@ update_cargo_version() {
   mv "$tmp" "$file"
 }
 
-update_cargo_version "$SEMVER"
-
-(
-  cd frontend
-  npm version "$SEMVER" --no-git-tag-version --allow-same-version >/dev/null
-)
+if [[ $MAKE_LATEST == false ]]; then
+  if ! awk -v version="$SEMVER" '/^\[package\]$/ { pkg=1; next } /^\[/ { pkg=0 } pkg && $0 == "version = \"" version "\"" { ok=1 } END { exit !ok }' Cargo.toml ||
+     ! awk -v version="$SEMVER" '$0 == "name = \"reader-next\"" { getline; ok=($0 == "version = \"" version "\"") } END { exit !ok }' Cargo.lock ||
+     ! node -e 'const v=process.argv[1], p=require("./frontend/package.json"), l=require("./frontend/package-lock.json"); process.exit([p.version, l.version, l.packages[""].version].every(x => x===v) ? 0 : 1)' "$SEMVER"; then
+    echo "The reviewed 1.2.1 commit must already contain matching version files." >&2
+    exit 1
+  fi
+else
+  update_cargo_version "$SEMVER"
+  (
+    cd frontend
+    npm version "$SEMVER" --no-git-tag-version --allow-same-version >/dev/null
+  )
+  cargo update --workspace
+fi
 
 echo "Building frontend..."
 (
   cd frontend
-  npm install
+  npm ci
   npm run build
 )
 
@@ -160,17 +192,19 @@ fi
 git tag -a "$TAG" -m "$TAG"
 
 echo "Pushing git refs..."
-current_branch="$(git branch --show-current)"
-git push origin "$current_branch"
-git push origin "$TAG"
+git push --atomic origin "$current_branch" "$TAG"
 
 echo "Creating GitHub release..."
 gh release create "$TAG" \
-  --title "$TAG" \
+  --verify-tag \
+  --title "$SEMVER" \
+  --latest="$MAKE_LATEST" \
   --generate-notes
 
 echo "Release completed: $TAG"
 echo "GitHub release: https://github.com/1432433gg/reader-next/releases/tag/${TAG}"
 echo "Docker publish workflow should create:"
 echo "  ${DOCKER_REPO}:${SEMVER}"
-echo "  ${DOCKER_REPO}:latest"
+if [[ $MAKE_LATEST == true ]]; then
+  echo "  ${DOCKER_REPO}:latest"
+fi

@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
 # 三段构建：先编前端（Node），再编后端（Rust），最后只把二进制和前端产物放进精简的运行镜像。
-# 镜像标签由 .github/workflows/docker-publish.yml 在发版时贴：版本号和 latest。
+# 镜像标签由 .github/workflows/docker-publish.yml 按发布渠道生成。
 
 FROM node:22-bookworm-slim AS frontend-builder
 WORKDIR /app/frontend
@@ -28,6 +28,8 @@ RUN apt-get -o Acquire::Retries=3 update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+LABEL org.opencontainers.image.version="1.2.1" \
+      io.reader-next.bundled-webview="1"
 RUN useradd --system --uid 10001 --create-home --home-dir /app reader
 COPY --from=backend-builder /app/reader-next /app/reader-next
 COPY --from=frontend-builder /app/frontend/dist /app/web/dist
